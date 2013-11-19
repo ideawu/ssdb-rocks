@@ -1,0 +1,3 @@
+* add ping command
+
+* process scan requests in seperate threads?

@@ -1,0 +1,359 @@
+#include "binlog.h"
+#include "util/log.h"
+#include "util/strings.h"
+#include <map>
+
+/* Binlog */
+
+Binlog::Binlog(uint64_t seq, char type, char cmd, const rocksdb::Slice &key){
+	buf.append((char *)(&seq), sizeof(uint64_t));
+	buf.push_back(type);
+	buf.push_back(cmd);
+	buf.append(key.data(), key.size());
+}
+
+uint64_t Binlog::seq() const{
+	return *((uint64_t *)(buf.data()));
+}
+
+char Binlog::type() const{
+	return buf[sizeof(uint64_t)];
+}
+
+char Binlog::cmd() const{
+	return buf[sizeof(uint64_t) + 1];
+}
+
+const Bytes Binlog::key() const{
+	return Bytes(buf.data() + HEADER_LEN, buf.size() - HEADER_LEN);
+}
+
+int Binlog::load(const rocksdb::Slice &s){
+	if(s.size() < HEADER_LEN){
+		return -1;
+	}
+	buf.assign(s.data(), s.size());
+	return 0;
+}
+
+std::string Binlog::dumps() const{
+	std::string str;
+	if(buf.size() < HEADER_LEN){
+		return str;
+	}
+	char buf[20];
+	snprintf(buf, sizeof(buf), "%" PRIu64 " ", this->seq());
+	str.append(buf);
+
+	switch(this->type()){
+		case BinlogType::NOOP:
+			str.append("noop ");
+			break;
+		case BinlogType::SYNC:
+			str.append("sync ");
+			break;
+		case BinlogType::MIRROR:
+			str.append("mirror ");
+			break;
+		case BinlogType::COPY:
+			str.append("copy ");
+			break;
+	}
+	switch(this->cmd()){
+		case BinlogCommand::NONE:
+			str.append("none ");
+			break;
+		case BinlogCommand::KSET:
+			str.append("set ");
+			break;
+		case BinlogCommand::KDEL:
+			str.append("del ");
+			break;
+		case BinlogCommand::HSET:
+			str.append("hset ");
+			break;
+		case BinlogCommand::HDEL:
+			str.append("hdel ");
+			break;
+		case BinlogCommand::ZSET:
+			str.append("zset ");
+			break;
+		case BinlogCommand::ZDEL:
+			str.append("zdel ");
+			break;
+		case BinlogCommand::BEGIN:
+			str.append("begin ");
+			break;
+		case BinlogCommand::END:
+			str.append("end ");
+			break;
+	}
+	Bytes b = this->key();
+	str.append(hexmem(b.data(), b.size()));
+	return str;
+}
+
+
+/* SyncLogQueue */
+
+static inline std::string encode_seq_key(uint64_t seq){
+	seq = big_endian(seq);
+	std::string ret;
+	ret.push_back(DataType::SYNCLOG);
+	ret.append((char *)&seq, sizeof(seq));
+	return ret;
+}
+
+static inline uint64_t decode_seq_key(const rocksdb::Slice &key){
+	uint64_t seq = 0;
+	if(key.size() == (sizeof(uint64_t) + 1) && key.data()[0] == DataType::SYNCLOG){
+		seq = *((uint64_t *)(key.data() + 1));
+		seq = big_endian(seq);
+	}
+	return seq;
+}
+
+BinlogQueue::BinlogQueue(rocksdb::DB *db){
+	this->db = db;
+	this->min_seq = 0;
+	this->last_seq = 0;
+	this->tran_seq = 0;
+	this->capacity = LOG_QUEUE_SIZE;
+	
+	Binlog log;
+	if(this->find_last(&log) == 1){
+		this->last_seq = log.seq();
+	}
+	if(this->find_next(1, &log) == 1){
+		this->min_seq = log.seq();
+	}
+	log_debug("capacity: %d, min: %" PRIu64 ", max: %" PRIu64 ",", capacity, min_seq, last_seq);
+
+	//this->merge();
+		/*
+	int noops = 0;
+	int total = 0;
+	uint64_t seq = this->min_seq;
+	while(this->find_next(seq, &log) == 1){
+		total ++;
+		seq = log.seq() + 1;
+		if(log.type() != BinlogType::NOOP){
+			std::string s = log.dumps();
+			//log_trace("%s", s.c_str());
+			noops ++;
+		}
+	}
+	log_debug("capacity: %d, min: %" PRIu64 ", max: %" PRIu64 ", noops: %d, total: %d",
+		capacity, min_seq, last_seq, noops, total);
+		*/
+
+	// start cleaning thread
+	thread_quit = false;
+	pthread_t tid;
+	int err = pthread_create(&tid, NULL, &BinlogQueue::log_clean_thread_func, this);
+	if(err != 0){
+		log_fatal("can't create thread: %s", strerror(err));
+		exit(0);
+	}
+}
+
+BinlogQueue::~BinlogQueue(){
+	thread_quit = true;
+	while(1){
+		if(thread_quit == false){
+			break;
+		}
+		usleep(10 * 1000);
+	}
+	log_debug("BinlogQueue finalized");
+}
+
+void BinlogQueue::begin(){
+	tran_seq = last_seq;
+	batch.Clear();
+}
+
+void BinlogQueue::rollback(){
+	tran_seq = 0;
+}
+
+rocksdb::Status BinlogQueue::commit(){
+	rocksdb::WriteOptions write_opts;
+	rocksdb::Status s = db->Write(write_opts, &batch);
+	if(s.ok()){
+		last_seq = tran_seq;
+		tran_seq = 0;
+	}
+	return s;
+}
+
+void BinlogQueue::add(char type, char cmd, const rocksdb::Slice &key){
+	tran_seq ++;
+	Binlog log(tran_seq, type, cmd, key);
+	batch.Put(encode_seq_key(tran_seq), log.repr());
+}
+
+void BinlogQueue::add(char type, char cmd, const std::string &key){
+	rocksdb::Slice s(key);
+	this->add(type, cmd, s);
+}
+
+// rocksdb put
+void BinlogQueue::Put(const rocksdb::Slice& key, const rocksdb::Slice& value){
+	batch.Put(key, value);
+}
+
+// rocksdb delete
+void BinlogQueue::Delete(const rocksdb::Slice& key){
+	batch.Delete(key);
+}
+	
+int BinlogQueue::find_next(uint64_t next_seq, Binlog *log) const{
+	if(this->get(next_seq, log) == 1){
+		return 1;
+	}
+	uint64_t ret = 0;
+	std::string key_str = encode_seq_key(next_seq);
+	rocksdb::ReadOptions iterate_options;
+	rocksdb::Iterator *it = db->NewIterator(iterate_options);
+	it->Seek(key_str);
+	if(it->Valid()){
+		rocksdb::Slice key = it->key();
+		if(decode_seq_key(key) != 0){
+			rocksdb::Slice val = it->value();
+			if(log->load(val) == -1){
+				ret = -1;
+			}else{
+				ret = 1;
+			}
+		}
+	}
+	delete it;
+	return ret;
+}
+
+int BinlogQueue::find_last(Binlog *log) const{
+	uint64_t ret = 0;
+	std::string key_str = encode_seq_key(UINT64_MAX);
+	rocksdb::ReadOptions iterate_options;
+	rocksdb::Iterator *it = db->NewIterator(iterate_options);
+	it->Seek(key_str);
+	if(!it->Valid()){
+		// Iterator::prev requires Valid, so we seek to last
+		it->SeekToLast();
+	}else{
+		// UINT64_MAX is not used 
+		it->Prev();
+	}
+	if(it->Valid()){
+		rocksdb::Slice key = it->key();
+		if(decode_seq_key(key) != 0){
+			rocksdb::Slice val = it->value();
+			if(log->load(val) == -1){
+				ret = -1;
+			}else{
+				ret = 1;
+			}
+		}
+	}
+	delete it;
+	return ret;
+}
+
+int BinlogQueue::get(uint64_t seq, Binlog *log) const{
+	std::string val;
+	rocksdb::Status s = db->Get(rocksdb::ReadOptions(), encode_seq_key(seq), &val);
+	if(s.ok()){
+		if(log->load(val) != -1){
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int BinlogQueue::update(uint64_t seq, char type, char cmd, const std::string &key){
+	Binlog log(seq, type, cmd, key);
+	rocksdb::Status s = db->Put(rocksdb::WriteOptions(), encode_seq_key(seq), log.repr());
+	if(s.ok()){
+		return 0;
+	}
+	return -1;
+}
+
+int BinlogQueue::del(uint64_t seq){
+	rocksdb::Status s = db->Delete(rocksdb::WriteOptions(), encode_seq_key(seq));
+	if(!s.ok()){
+		return -1;
+	}
+	return 0;
+}
+
+void BinlogQueue::flush(){
+	del_range(this->min_seq, this->last_seq);
+}
+
+int BinlogQueue::del_range(uint64_t start, uint64_t end){
+	while(start <= end){
+		rocksdb::WriteBatch batch;
+		for(int count = 0; start <= end && count < 1000; start++, count++){
+			batch.Delete(encode_seq_key(start));
+		}
+		rocksdb::Status s = db->Write(rocksdb::WriteOptions(), &batch);
+		if(!s.ok()){
+			return -1;
+		}
+	}
+	return 0;
+}
+
+void* BinlogQueue::log_clean_thread_func(void *arg){
+	BinlogQueue *logs = (BinlogQueue *)arg;
+	
+	while(!logs->thread_quit){
+		usleep(100 * 1000);
+
+		if(logs->last_seq - logs->min_seq < LOG_QUEUE_SIZE * 1.1){
+			continue;
+		}
+		
+		uint64_t start = logs->min_seq;
+		uint64_t end = logs->last_seq - LOG_QUEUE_SIZE;
+		logs->del_range(start, end);
+		logs->min_seq = end + 1;
+		log_info("clean %d logs[%" PRIu64 " ~ %" PRIu64 "], %d left, max: %" PRIu64 "",
+			end-start+1, start, end, logs->last_seq - logs->min_seq + 1, logs->last_seq);
+	}
+	log_debug("clean_thread quit");
+	
+	logs->thread_quit = false;
+	return (void *)NULL;
+}
+
+// TESTING, slow, so not used
+void BinlogQueue::merge(){
+	std::map<std::string, uint64_t> key_map;
+	uint64_t start = min_seq;
+	uint64_t end = last_seq;
+	int reduce_count = 0;
+	int total = 0;
+	total = end - start + 1;
+	log_trace("merge begin");
+	for(; start <= end; start++){
+		Binlog log;
+		if(this->get(start, &log) == 1){
+			if(log.type() == BinlogType::NOOP){
+				continue;
+			}
+			std::string key = log.key().String();
+			std::map<std::string, uint64_t>::iterator it = key_map.find(key);
+			if(it != key_map.end()){
+				uint64_t seq = it->second;
+				this->update(seq, BinlogType::NOOP, BinlogCommand::NONE, "");
+				//log_trace("merge update %" PRIu64 " to NOOP", seq);
+				reduce_count ++;
+			}
+			key_map[key] = log.seq();
+		}
+	}
+	log_trace("merge reduce %d of %d binlogs", reduce_count, total);
+}
