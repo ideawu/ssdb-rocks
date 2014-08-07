@@ -1,71 +1,70 @@
 #include "t_hash.h"
 #include "ssdb.h"
-#include "rocksdb/write_batch.h"
-#include "util/lock.h"
-#include "util/thread.h"
+#include "leveldb/write_batch.h"
 
 static int hset_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, const Bytes &val, char log_type);
 static int hdel_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, char log_type);
 static int incr_hsize(SSDB *ssdb, const Bytes &name, int64_t incr);
 
-int SSDB::multi_hset(const Bytes &name, const std::vector<Bytes> &kvs, int offset, char log_type){
-	Transaction trans(binlogs);
-
-	int ret = 0;
-	std::vector<Bytes>::const_iterator it;
-	it = kvs.begin() + offset;
-	for(; it != kvs.end(); it += 2){
-		const Bytes &key = *it;
-		const Bytes &val = *(it + 1);
-		int tmp = hset_one(this, name, key, val, log_type);
-		if(tmp == -1){
-			return -1;
-		}
-		ret += tmp;
-	}
-	if(ret >= 0){
-		if(ret > 0){
-			if(incr_hsize(this, name, ret) == -1){
-				return -1;
-			}
-		}
-		rocksdb::Status s = binlogs->commit();
-		if(!s.ok()){
-			log_error("zdel error: %s", s.ToString().c_str());
-			return -1;
-		}
-	}
-	return ret;
-}
-
-int SSDB::multi_hdel(const Bytes &name, const std::vector<Bytes> &keys, int offset, char log_type){
-	Transaction trans(binlogs);
-
-	int ret = 0;
-	std::vector<Bytes>::const_iterator it;
-	it = keys.begin() + offset;
-	for(; it != keys.end(); it++){
-		const Bytes &key = *it;
-		int tmp = hdel_one(this, name, key, log_type);
-		if(tmp == -1){
-			return -1;
-		}
-		ret += tmp;
-	}
-	if(ret >= 0){
-		if(ret > 0){
-			if(incr_hsize(this, name, -ret) == -1){
-				return -1;
-			}
-		}
-		rocksdb::Status s = binlogs->commit();
-		if(!s.ok()){
-			log_error("zdel error: %s", s.ToString().c_str());
-			return -1;
-		}
-	}
-	return ret;
-}
+// multi_hset work incorrect when same key occurs in kvs more than once
+//int SSDB::multi_hset(const Bytes &name, const std::vector<Bytes> &kvs, int offset, char log_type){
+//	Transaction trans(binlogs);
+//
+//	int ret = 0;
+//	std::vector<Bytes>::const_iterator it;
+//	it = kvs.begin() + offset;
+//	for(; it != kvs.end(); it += 2){
+//		const Bytes &key = *it;
+//		const Bytes &val = *(it + 1);
+//		int tmp = hset_one(this, name, key, val, log_type);
+//		if(tmp == -1){
+//			return -1;
+//		}
+//		ret += tmp;
+//	}
+//	if(ret >= 0){
+//		if(ret > 0){
+//			if(incr_hsize(this, name, ret) == -1){
+//				return -1;
+//			}
+//		}
+//		leveldb::Status s = binlogs->commit();
+//		if(!s.ok()){
+//			log_error("zdel error: %s", s.ToString().c_str());
+//			return -1;
+//		}
+//	}
+//	return ret;
+//}
+//
+//int SSDB::multi_hdel(const Bytes &name, const std::vector<Bytes> &keys, int offset, char log_type){
+//	Transaction trans(binlogs);
+//
+//	int ret = 0;
+//	std::vector<Bytes>::const_iterator it;
+//	it = keys.begin() + offset;
+//	for(; it != keys.end(); it++){
+//		const Bytes &key = *it;
+//		int tmp = hdel_one(this, name, key, log_type);
+//		if(tmp == -1){
+//			return -1;
+//		}
+//		ret += tmp;
+//	}
+//	if(ret >= 0){
+//		if(ret > 0){
+//			if(incr_hsize(this, name, -ret) == -1){
+//				return -1;
+//			}
+//		}
+//		leveldb::Status s = binlogs->commit();
+//		if(!s.ok()){
+//			log_error("zdel error: %s", s.ToString().c_str());
+//			return -1;
+//		}
+//	}
+//	return ret;
+//}
 
 /**
  * @return -1: error, 0: item updated, 1: new item inserted
@@ -80,7 +79,7 @@ int SSDB::hset(const Bytes &name, const Bytes &key, const Bytes &val, char log_t
 				return -1;
 			}
 		}
-		rocksdb::Status s = binlogs->commit();
+		leveldb::Status s = binlogs->commit();
 		if(!s.ok()){
 			return -1;
 		}
@@ -98,7 +97,7 @@ int SSDB::hdel(const Bytes &name, const Bytes &key, char log_type){
 				return -1;
 			}
 		}
-		rocksdb::Status s = binlogs->commit();
+		leveldb::Status s = binlogs->commit();
 		if(!s.ok()){
 			return -1;
 		}
@@ -128,7 +127,7 @@ int SSDB::hincr(const Bytes &name, const Bytes &key, int64_t by, std::string *ne
 				return -1;
 			}
 		}
-		rocksdb::Status s = binlogs->commit();
+		leveldb::Status s = binlogs->commit();
 		if(!s.ok()){
 			return -1;
 		}
@@ -139,9 +138,9 @@ int SSDB::hincr(const Bytes &name, const Bytes &key, int64_t by, std::string *ne
 int64_t SSDB::hsize(const Bytes &name) const{
 	std::string size_key = encode_hsize_key(name);
 	std::string val;
-	rocksdb::Status s;
+	leveldb::Status s;
 
-	s = db->Get(rocksdb::ReadOptions(), size_key, &val);
+	s = db->Get(leveldb::ReadOptions(), size_key, &val);
 	if(s.IsNotFound()){
 		return 0;
 	}else if(!s.ok()){
@@ -157,7 +156,7 @@ int64_t SSDB::hsize(const Bytes &name) const{
 
 int SSDB::hget(const Bytes &name, const Bytes &key, std::string *val) const{
 	std::string dbkey = encode_hash_key(name, key);
-	rocksdb::Status s = db->Get(rocksdb::ReadOptions(), dbkey, val);
+	leveldb::Status s = db->Get(leveldb::ReadOptions(), dbkey, val);
 	if(s.IsNotFound()){
 		return 0;
 	}
@@ -196,15 +195,7 @@ HIterator* SSDB::hrscan(const Bytes &name, const Bytes &start, const Bytes &end,
 	return new HIterator(this->rev_iterator(key_start, key_end, limit), name);
 }
 
-int SSDB::hlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
-		std::vector<std::string> *list) const{
-	std::string start;
-	std::string end;
-	start = encode_hsize_key(name_s);
-	if(!name_e.empty()){
-		end = encode_hsize_key(name_e);
-	}
-	Iterator *it = this->iterator(start, end, limit);
+static void get_hnames(Iterator *it, std::vector<std::string> *list){
 	while(it->next()){
 		Bytes ks = it->key();
 		if(ks.data()[0] != DataType::HSIZE){
@@ -216,18 +207,55 @@ int SSDB::hlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
 		}
 		list->push_back(n);
 	}
+}
+
+int SSDB::hlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
+		std::vector<std::string> *list) const{
+	std::string start;
+	std::string end;
+	
+	start = encode_hsize_key(name_s);
+	if(!name_e.empty()){
+		end = encode_hsize_key(name_e);
+	}
+	
+	Iterator *it = this->iterator(start, end, limit);
+	get_hnames(it, list);
+	delete it;
+	return 0;
+}
+
+int SSDB::hrlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
+		std::vector<std::string> *list) const{
+	std::string start;
+	std::string end;
+	
+	start = encode_hsize_key(name_s);
+	if(name_s.empty()){
+		start.append(1, 255);
+	}
+	if(!name_e.empty()){
+		end = encode_hsize_key(name_e);
+	}
+	
+	Iterator *it = this->rev_iterator(start, end, limit);
+	get_hnames(it, list);
 	delete it;
 	return 0;
 }
 
 // returns the number of newly added items
 static int hset_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, const Bytes &val, char log_type){
+	if(name.empty() || key.empty()){
+		log_error("empty name or key!");
+		return -1;
+	}
 	if(name.size() > SSDB_KEY_LEN_MAX ){
-		log_error("name too long!");
+		log_error("name too long! %s", hexmem(name.data(), name.size()).c_str());
 		return -1;
 	}
 	if(key.size() > SSDB_KEY_LEN_MAX){
-		log_error("key too long!");
+		log_error("key too long! %s", hexmem(key.data(), key.size()).c_str());
 		return -1;
 	}
 	int ret = 0;
@@ -235,13 +263,13 @@ static int hset_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, const
 	if(ssdb->hget(name, key, &dbval) == 0){ // not found
 		std::string hkey = encode_hash_key(name, key);
 		ssdb->binlogs->Put(hkey, val.Slice());
-		ssdb->binlogs->add(log_type, BinlogCommand::HSET, hkey);
+		ssdb->binlogs->add_log(log_type, BinlogCommand::HSET, hkey);
 		ret = 1;
 	}else{
 		if(dbval != val){
 			std::string hkey = encode_hash_key(name, key);
 			ssdb->binlogs->Put(hkey, val.Slice());
-			ssdb->binlogs->add(log_type, BinlogCommand::HSET, hkey);
+			ssdb->binlogs->add_log(log_type, BinlogCommand::HSET, hkey);
 		}
 		ret = 0;
 	}
@@ -250,11 +278,11 @@ static int hset_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, const
 
 static int hdel_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, char log_type){
 	if(name.size() > SSDB_KEY_LEN_MAX ){
-		log_error("name too long!");
+		log_error("name too long! %s", hexmem(name.data(), name.size()).c_str());
 		return -1;
 	}
 	if(key.size() > SSDB_KEY_LEN_MAX){
-		log_error("key too long!");
+		log_error("key too long! %s", hexmem(key.data(), key.size()).c_str());
 		return -1;
 	}
 	std::string dbval;
@@ -264,7 +292,7 @@ static int hdel_one(const SSDB *ssdb, const Bytes &name, const Bytes &key, char 
 
 	std::string hkey = encode_hash_key(name, key);
 	ssdb->binlogs->Delete(hkey);
-	ssdb->binlogs->add(log_type, BinlogCommand::HDEL, hkey);
+	ssdb->binlogs->add_log(log_type, BinlogCommand::HDEL, hkey);
 	
 	return 1;
 }
@@ -276,7 +304,7 @@ static int incr_hsize(SSDB *ssdb, const Bytes &name, int64_t incr){
 	if(size == 0){
 		ssdb->binlogs->Delete(size_key);
 	}else{
-		ssdb->binlogs->Put(size_key, rocksdb::Slice((char *)&size, sizeof(int64_t)));
+		ssdb->binlogs->Put(size_key, leveldb::Slice((char *)&size, sizeof(int64_t)));
 	}
 	return 0;
 }

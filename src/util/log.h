@@ -66,6 +66,7 @@ int log_level();
 void set_log_level(int level);
 int log_write(int level, const char *fmt, ...);
 
+
 #ifdef NDEBUG
 	#define log_trace(fmt, args...) do{}while(0)
 #else
@@ -84,14 +85,5 @@ int log_write(int level, const char *fmt, ...);
 #define log_fatal(fmt, args...)	\
 	log_write(Logger::LEVEL_FATAL, "%s(%d): " fmt, __FILE__, __LINE__, ##args)
 
-/*
-#define log_trace(fmt, args...) do{}while(0)
-#define log_debug(fmt, args...) do{}while(0)
-#define log_info(fmt, args...) do{}while(0)
-#define log_warn(fmt, args...) do{}while(0)
-#define log_error(fmt, args...) do{}while(0)
-#define log_fatal(fmt, args...)	\
-	log_write(Logger::LEVEL_FATAL, "%s(%d): " fmt, __FILE__, __LINE__, ##args)
-*/
 
 #endif

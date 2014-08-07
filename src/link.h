@@ -4,16 +4,21 @@
 #include <vector>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 
 #include "util/bytes.h"
+
+#include "link_redis.h"
 
 class Link{
 	private:
 		int sock;
 		bool noblock_;
+		bool error_;
 		std::vector<Bytes> recv_data;
 
+		RedisLink *redis;
 	public:
 		char remote_ip[INET_ADDRSTRLEN];
 		int remote_port;
@@ -38,6 +43,12 @@ class Link{
 
 		int fd() const{
 			return sock;
+		}
+		bool error() const{
+			return error_;
+		}
+		void mark_error(){
+			error_ = true;
 		}
 
 		static Link* connect(const char *ip, int port);

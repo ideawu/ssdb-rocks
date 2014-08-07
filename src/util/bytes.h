@@ -2,7 +2,7 @@
 #define UTIL_BYTES_H_
 
 #include "../include.h"
-#include "rocksdb/slice.h"
+#include "leveldb/slice.h"
 #include "strings.h"
 
 // readonly
@@ -17,6 +17,11 @@ class Bytes{
 			size_ = 0;
 		}
 
+		Bytes(void *data, int size){
+			data_ = (char *)data;
+			size_ = size;
+		}
+
 		Bytes(const char *data, int size){
 			data_ = data;
 			size_ = size;
@@ -27,7 +32,7 @@ class Bytes{
 			size_ = str.size();
 		}
 
-		Bytes(const rocksdb::Slice &slice){
+		Bytes(const leveldb::Slice &slice){
 			data_ = slice.data();
 			size_ = slice.size();
 		}
@@ -59,8 +64,8 @@ class Bytes{
 			return r;
 		}
 
-		rocksdb::Slice Slice() const{
-			return rocksdb::Slice(data_, size_);
+		leveldb::Slice Slice() const{
+			return leveldb::Slice(data_, size_);
 		}
 
 		std::string String() const{
@@ -207,6 +212,17 @@ public:
 		p += sizeof(int64_t);
 		size -= sizeof(int64_t);
 		return sizeof(int64_t);
+	}
+	int read_uint64(uint64_t *ret){
+		if(size < sizeof(uint64_t)){
+			return -1;
+		}
+		if(ret){
+			*ret = *(uint64_t *)p;
+		}
+		p += sizeof(uint64_t);
+		size -= sizeof(uint64_t);
+		return sizeof(uint64_t);
 	}
 	int read_data(std::string *ret){
 		int n = size;

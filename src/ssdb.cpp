@@ -1,15 +1,16 @@
 #include "ssdb.h"
 #include "slave.h"
-#include "rocksdb/env.h"
-#include "rocksdb/iterator.h"
-#include "rocksdb/cache.h"
-#include "rocksdb/filter_policy.h"
+#include "leveldb/env.h"
+#include "leveldb/iterator.h"
+#include "leveldb/cache.h"
+#include "leveldb/filter_policy.h"
 
 #include "t_kv.h"
 #include "t_hash.h"
 #include "t_zset.h"
+#include "t_queue.h"
 
-SSDB::SSDB(){
+SSDB::SSDB(): sync_speed_(0){
 	db = NULL;
 	meta_db = NULL;
 	binlogs = NULL;
@@ -27,9 +28,6 @@ SSDB::~SSDB(){
 	if(db){
 		delete db;
 	}
-	if(options.block_cache){
-		//delete options.block_cache;
-	}
 	if(options.filter_policy){
 		delete options.filter_policy;
 	}
@@ -42,15 +40,20 @@ SSDB::~SSDB(){
 SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 	std::string main_db_path = base_dir + "/data";
 	std::string meta_db_path = base_dir + "/meta";
-	int cache_size = conf.get_num("rocksdb.cache_size");
-	int write_buffer_size = conf.get_num("rocksdb.write_buffer_size");
-	int block_size = conf.get_num("rocksdb.block_size");
-	int compaction_speed = conf.get_num("rocksdb.compaction_speed");
-	std::string compression = conf.get_str("rocksdb.compression");
+	size_t cache_size = (size_t)conf.get_num("leveldb.cache_size");
+	int write_buffer_size = conf.get_num("leveldb.write_buffer_size");
+	int block_size = conf.get_num("leveldb.block_size");
+	std::string compression = conf.get_str("leveldb.compression");
+	std::string binlog_onoff = conf.get_str("replication.binlog");
+	int sync_speed = conf.get_num("replication.sync_speed");
 
 	strtolower(&compression);
 	if(compression != "yes"){
 		compression = "no";
+	}
+	strtolower(&binlog_onoff);
+	if(binlog_onoff != "no"){
+		binlog_onoff = "yes";
 	}
 
 	if(cache_size <= 0){
@@ -68,44 +71,47 @@ SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 	log_info("cache_size       : %d MB", cache_size);
 	log_info("block_size       : %d KB", block_size);
 	log_info("write_buffer     : %d MB", write_buffer_size);
-	log_info("compaction_speed : %d MB/s", compaction_speed);
 	log_info("compression      : %s", compression.c_str());
+	log_info("binlog           : %s", binlog_onoff.c_str());
+	log_info("sync_speed       : %d MB/s", sync_speed);
 
 	SSDB *ssdb = new SSDB();
 	//
 	ssdb->options.create_if_missing = true;
-	ssdb->options.filter_policy = rocksdb::NewBloomFilterPolicy(10);
-	ssdb->options.block_cache = rocksdb::NewLRUCache(cache_size * 1048576);
+	ssdb->options.filter_policy = leveldb::NewBloomFilterPolicy(10);
+	ssdb->options.block_cache = leveldb::NewLRUCache(cache_size * 1048576);
 	ssdb->options.block_size = block_size * 1024;
 	ssdb->options.write_buffer_size = write_buffer_size * 1024 * 1024;
-	ssdb->options.max_open_files = 200;
-	//ssdb->options.compaction_speed = compaction_speed;
 	if(compression == "yes"){
-		ssdb->options.compression = rocksdb::kSnappyCompression;
+		ssdb->options.compression = leveldb::kSnappyCompression;
 	}else{
-		ssdb->options.compression = rocksdb::kNoCompression;
+		ssdb->options.compression = leveldb::kNoCompression;
 	}
 
-	rocksdb::Status status;
+	leveldb::Status status;
 	{
-		rocksdb::Options options;
+		leveldb::Options options;
 		options.create_if_missing = true;
-		status = rocksdb::DB::Open(options, meta_db_path, &ssdb->meta_db);
+		status = leveldb::DB::Open(options, meta_db_path, &ssdb->meta_db);
 		if(!status.ok()){
 			goto err;
 		}
 	}
 
-	status = rocksdb::DB::Open(ssdb->options, main_db_path, &ssdb->db);
+	status = leveldb::DB::Open(ssdb->options, main_db_path, &ssdb->db);
 	if(!status.ok()){
 		log_error("open main_db failed");
 		goto err;
 	}
 	ssdb->binlogs = new BinlogQueue(ssdb->db);
+	if(binlog_onoff == "no"){
+		ssdb->binlogs->no_log();
+	}
 
 	{ // slaves
 		const Config *repl_conf = conf.get("replication");
 		if(repl_conf != NULL){
+			ssdb->sync_speed_ = sync_speed;
 			std::vector<Config *> children = repl_conf->children;
 			for(std::vector<Config *>::iterator it = children.begin(); it != children.end(); it++){
 				Config *c = *it;
@@ -126,8 +132,13 @@ SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 					is_mirror = false;
 				}
 				
+				std::string id = c->get_str("id");
+				
 				log_info("slaveof: %s:%d, type: %s", ip.c_str(), port, type.c_str());
 				Slave *slave = new Slave(ssdb, ssdb->meta_db, ip.c_str(), port, is_mirror);
+				if(!id.empty()){
+					slave->set_id(id);
+				}
 				slave->start();
 				ssdb->slaves.push_back(slave);
 			}
@@ -143,8 +154,8 @@ err:
 }
 
 Iterator* SSDB::iterator(const std::string &start, const std::string &end, uint64_t limit) const{
-	rocksdb::Iterator *it;
-	rocksdb::ReadOptions iterate_options;
+	leveldb::Iterator *it;
+	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
 	it = db->NewIterator(iterate_options);
 	it->Seek(start);
@@ -155,8 +166,8 @@ Iterator* SSDB::iterator(const std::string &start, const std::string &end, uint6
 }
 
 Iterator* SSDB::rev_iterator(const std::string &start, const std::string &end, uint64_t limit) const{
-	rocksdb::Iterator *it;
-	rocksdb::ReadOptions iterate_options;
+	leveldb::Iterator *it;
+	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
 	it = db->NewIterator(iterate_options);
 	it->Seek(start);
@@ -172,8 +183,8 @@ Iterator* SSDB::rev_iterator(const std::string &start, const std::string &end, u
 /* raw operates */
 
 int SSDB::raw_set(const Bytes &key, const Bytes &val) const{
-	rocksdb::WriteOptions write_opts;
-	rocksdb::Status s = db->Put(write_opts, key.Slice(), val.Slice());
+	leveldb::WriteOptions write_opts;
+	leveldb::Status s = db->Put(write_opts, key.Slice(), val.Slice());
 	if(!s.ok()){
 		log_error("set error: %s", s.ToString().c_str());
 		return -1;
@@ -182,8 +193,8 @@ int SSDB::raw_set(const Bytes &key, const Bytes &val) const{
 }
 
 int SSDB::raw_del(const Bytes &key) const{
-	rocksdb::WriteOptions write_opts;
-	rocksdb::Status s = db->Delete(write_opts, key.Slice());
+	leveldb::WriteOptions write_opts;
+	leveldb::Status s = db->Delete(write_opts, key.Slice());
 	if(!s.ok()){
 		log_error("del error: %s", s.ToString().c_str());
 		return -1;
@@ -192,9 +203,9 @@ int SSDB::raw_del(const Bytes &key) const{
 }
 
 int SSDB::raw_get(const Bytes &key, std::string *val) const{
-	rocksdb::ReadOptions opts;
+	leveldb::ReadOptions opts;
 	opts.fill_cache = false;
-	rocksdb::Status s = db->Get(opts, key.Slice(), val);
+	leveldb::Status s = db->Get(opts, key.Slice(), val);
 	if(s.IsNotFound()){
 		return 0;
 	}
@@ -206,23 +217,23 @@ int SSDB::raw_get(const Bytes &key, std::string *val) const{
 }
 
 std::vector<std::string> SSDB::info() const{
-	//  "rocksdb.num-files-at-level<N>" - return the number of files at level <N>,
+	//  "leveldb.num-files-at-level<N>" - return the number of files at level <N>,
 	//     where <N> is an ASCII representation of a level number (e.g. "0").
-	//  "rocksdb.stats" - returns a multi-line string that describes statistics
+	//  "leveldb.stats" - returns a multi-line string that describes statistics
 	//     about the internal operation of the DB.
-	//  "rocksdb.sstables" - returns a multi-line string that describes all
+	//  "leveldb.sstables" - returns a multi-line string that describes all
 	//     of the sstables that make up the db contents.
 	std::vector<std::string> info;
 	std::vector<std::string> keys;
 	/*
 	for(int i=0; i<7; i++){
 		char buf[128];
-		snprintf(buf, sizeof(buf), "rocksdb.num-files-at-level%d", i);
+		snprintf(buf, sizeof(buf), "leveldb.num-files-at-level%d", i);
 		keys.push_back(buf);
 	}
 	*/
-	keys.push_back("rocksdb.stats");
-	//keys.push_back("rocksdb.sstables");
+	keys.push_back("leveldb.stats");
+	//keys.push_back("leveldb.sstables");
 
 	for(size_t i=0; i<keys.size(); i++){
 		std::string key = keys[i];
@@ -245,6 +256,7 @@ int SSDB::key_range(std::vector<std::string> *keys) const{
 	std::string kstart, kend;
 	std::string hstart, hend;
 	std::string zstart, zend;
+	std::string qstart, qend;
 	
 	Iterator *it;
 	
@@ -331,6 +343,34 @@ int SSDB::key_range(std::vector<std::string> *keys) const{
 		}
 	}
 	delete it;
+	
+	it = this->iterator(encode_qsize_key(""), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::QSIZE){
+			std::string n;
+			if(decode_qsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				qstart = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->rev_iterator(encode_qsize_key("\xff"), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::QSIZE){
+			std::string n;
+			if(decode_qsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				qend = n;
+			}
+		}
+	}
+	delete it;
 
 	keys->push_back(kstart);
 	keys->push_back(kend);
@@ -338,6 +378,8 @@ int SSDB::key_range(std::vector<std::string> *keys) const{
 	keys->push_back(hend);
 	keys->push_back(zstart);
 	keys->push_back(zend);
+	keys->push_back(qstart);
+	keys->push_back(qend);
 	
 	return ret;
 }

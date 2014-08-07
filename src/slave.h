@@ -14,10 +14,12 @@ class Slave{
 		std::string last_key;
 		uint64_t copy_count;
 		uint64_t sync_count;
+		
+		std::string id_;
 
 		SSDB *ssdb;
 		Link *link;
-		rocksdb::DB* meta_db;
+		leveldb::DB* meta_db;
 		std::string master_ip;
 		int master_port;
 		bool is_mirror;
@@ -42,10 +44,12 @@ class Slave{
 			return link != NULL;
 		}
 	public:
-		Slave(SSDB *ssdb, rocksdb::DB* meta_db, const char *ip, int port, bool is_mirror=false);
+		Slave(SSDB *ssdb, leveldb::DB* meta_db, const char *ip, int port, bool is_mirror=false);
 		~Slave();
 		void start();
 		void stop();
+		
+		void set_id(const std::string &id);
 };
 
 #endif

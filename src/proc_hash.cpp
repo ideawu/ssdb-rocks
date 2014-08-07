@@ -67,16 +67,24 @@ static int proc_multi_hset(Server *serv, Link *link, const Request &req, Respons
 	if(req.size() < 4 || req.size() % 2 != 0){
 		resp->push_back("client_error");
 	}else{
+		int num = 0;
 		const Bytes &name = req[1];
-		int ret = serv->ssdb->multi_hset(name, req, 2);
-		if(ret == -1){
-			resp->push_back("error");
-		}else{
-			resp->push_back("ok");
-			char buf[20];
-			sprintf(buf, "%d", ret);
-			resp->push_back(buf);
+		std::vector<Bytes>::const_iterator it = req.begin() + 2;
+		for(; it != req.end(); it += 2){
+			const Bytes &key = *it;
+			const Bytes &val = *(it + 1);
+			int ret = serv->ssdb->hset(name, key, val);
+			if(ret == -1){
+				resp->push_back("error");
+				return 0;
+			}else{
+				num += ret;
+			}
 		}
+		resp->push_back("ok");
+		char buf[20];
+		sprintf(buf, "%d", num);
+		resp->push_back(buf);
 	}
 	return 0;
 }
@@ -85,16 +93,23 @@ static int proc_multi_hdel(Server *serv, Link *link, const Request &req, Respons
 	if(req.size() < 3){
 		resp->push_back("client_error");
 	}else{
+		int num = 0;
 		const Bytes &name = req[1];
-		int ret = serv->ssdb->multi_hdel(name, req, 2);
-		if(ret == -1){
-			resp->push_back("error");
-		}else{
-			resp->push_back("ok");
-			char buf[20];
-			sprintf(buf, "%d", ret);
-			resp->push_back(buf);
+		std::vector<Bytes>::const_iterator it = req.begin() + 2;
+		for(; it != req.end(); it += 1){
+			const Bytes &key = *it;
+			int ret = serv->ssdb->hdel(name, key);
+			if(ret == -1){
+				resp->push_back("error");
+				return 0;
+			}else{
+				num += ret;
+			}
 		}
+		resp->push_back("ok");
+		char buf[20];
+		sprintf(buf, "%d", num);
+		resp->push_back(buf);
 	}
 	return 0;
 }
@@ -117,7 +132,6 @@ static int proc_multi_hget(Server *serv, Link *link, const Request &req, Respons
 			}else if(ret == 0){
 				//
 			}else{
-				log_error("fail");
 				resp->push_back("0");
 			}
 		}
@@ -173,8 +187,7 @@ static int proc_hget(Server *serv, Link *link, const Request &req, Response *res
 		}else if(ret == 0){
 			resp->push_back("not_found");
 		}else{
-			log_error("fail");
-			resp->push_back("fail");
+			resp->push_back("error");
 		}
 	}
 	return 0;
@@ -209,33 +222,43 @@ static int proc_hclear(Server *serv, Link *link, const Request &req, Response *r
 	uint64_t total = 0;
 	while(1){
 		HIterator *it = serv->ssdb->hscan(name, "", "", 1000);
-		// we need std::string to hold the memory, because Bytes never alloc memory
-		std::vector<std::string> s_keys;
+		int num = 0;
 		while(it->next()){
-			s_keys.push_back(it->key);
-		}
+			int ret = serv->ssdb->hdel(name, it->key);
+			if(ret == -1){
+				resp->push_back("error");
+				delete it;
+				return 0;
+			}
+			num ++;
+		};
 		delete it;
-		
-		if(s_keys.empty()){
+
+		if(num == 0){
 			break;
 		}
-		std::vector<Bytes> keys;
-		for(std::vector<std::string>::iterator it=s_keys.begin(); it!=s_keys.end(); it++){
-			keys.push_back(*it);
-		}
-		int ret = serv->ssdb->multi_hdel(name, keys, 0);
-		if(ret == -1){
-			resp->push_back("error");
-			break;
-		}else{
-			total += ret;
-		}
+		total += num;
 	}
 	char buf[20];
 	snprintf(buf, sizeof(buf), "%" PRIu64 "", total);
 	resp->push_back("ok");
 	resp->push_back(buf);
 
+	return 0;
+}
+
+static int proc_hgetall(Server *serv, Link *link, const Request &req, Response *resp){
+	if(req.size() < 2){
+		resp->push_back("client_error");
+	}else{
+		HIterator *it = serv->ssdb->hscan(req[1], "", "", 2000000000);
+		resp->push_back("ok");
+		while(it->next()){
+			resp->push_back(it->key);
+			resp->push_back(it->val);
+		}
+		delete it;
+	}
 	return 0;
 }
 
@@ -288,6 +311,22 @@ static int proc_hkeys(Server *serv, Link *link, const Request &req, Response *re
 	return 0;
 }
 
+static int proc_hvals(Server *serv, Link *link, const Request &req, Response *resp){
+	if(req.size() < 5){
+		resp->push_back("client_error");
+	}else{
+		uint64_t limit = req[4].Uint64();
+		HIterator *it = serv->ssdb->hscan(req[1], req[2], req[3], limit);
+
+		resp->push_back("ok");
+		while(it->next()){
+			resp->push_back(it->val);
+		}
+		delete it;
+	}
+	return 0;
+}
+
 static int proc_hlist(Server *serv, Link *link, const Request &req, Response *resp){
 	if(req.size() < 4){
 		resp->push_back("client_error");
@@ -295,6 +334,25 @@ static int proc_hlist(Server *serv, Link *link, const Request &req, Response *re
 		uint64_t limit = req[3].Uint64();
 		std::vector<std::string> list;
 		int ret = serv->ssdb->hlist(req[1], req[2], limit, &list);
+		if(ret == -1){
+			resp->push_back("error");
+		}else{
+			resp->push_back("ok");
+			for(int i=0; i<list.size(); i++){
+				resp->push_back(list[i]);
+			}
+		}
+	}
+	return 0;
+}
+
+static int proc_hrlist(Server *serv, Link *link, const Request &req, Response *resp){
+	if(req.size() < 4){
+		resp->push_back("client_error");
+	}else{
+		uint64_t limit = req[3].Uint64();
+		std::vector<std::string> list;
+		int ret = serv->ssdb->hrlist(req[1], req[2], limit, &list);
 		if(ret == -1){
 			resp->push_back("error");
 		}else{

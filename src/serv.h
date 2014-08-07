@@ -9,6 +9,7 @@
 #include "ssdb.h"
 #include "backend_dump.h"
 #include "backend_sync.h"
+#include "ttl.h"
 
 #define PROC_OK			0
 #define PROC_ERROR		-1
@@ -37,7 +38,7 @@ struct Command{
 	double time_proc;
 };
 
-typedef struct _ProcJob{
+struct ProcJob{
 	int result;
 	Server *serv;
 	Link *link;
@@ -46,7 +47,7 @@ typedef struct _ProcJob{
 	double time_wait;
 	double time_proc;
 	
-	_ProcJob(){
+	ProcJob(){
 		result = 0;
 		serv = NULL;
 		link = NULL;
@@ -55,7 +56,7 @@ typedef struct _ProcJob{
 		time_wait = 0;
 		time_proc = 0;
 	}
-}ProcJob; // Request
+};
 
 
 class Server{
@@ -63,13 +64,19 @@ class Server{
 		static const int READER_THREADS = 10;
 		static const int WRITER_THREADS = 1;
 	public:
+		int link_count;
 		SSDB *ssdb;
 		BackendDump *backend_dump;
 		BackendSync *backend_sync;
+		ExpirationHandler *expiration;
 
 		Server(SSDB *ssdb);
 		~Server();
 		void proc(ProcJob *job);
+		
+		// TODO: move into Response
+		void int_reply(Response *resp, int num);
+		void bool_reply(Response *resp, int ret, const char *errmsg=NULL);
 
 		// WARN: pipe latency is about 20 us, it is really slow!
 		class ProcWorker : public WorkerPool<ProcWorker, ProcJob>::Worker{

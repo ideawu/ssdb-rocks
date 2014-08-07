@@ -2,7 +2,6 @@
 #include <vector>
 #include <string>
 #include <list>
-
 #include "version.h"
 #include "ssdb.h"
 #include "link.h"
@@ -12,6 +11,10 @@
 #include "util/daemon.h"
 #include "util/strings.h"
 #include "util/file.h"
+#include "util/ip_filter.h"
+
+#define TICK_INTERVAL       100 // ms
+#define STATUS_REPORT_TICKS (300 * 1000/TICK_INTERVAL) // second
 
 void welcome();
 void usage(int argc, char **argv);
@@ -23,13 +26,16 @@ void check_pidfile();
 void check_pidfile();
 void remove_pidfile();
 
-volatile bool quit = false;
 Config *conf = NULL;
 SSDB *ssdb = NULL;
 Link *serv_link = NULL;
+IpFilter *ip_filter = NULL;
+Fdevents *fdes = NULL;
 
 typedef std::vector<Link *> ready_list_t;
 
+volatile bool quit = false;
+volatile uint32_t g_ticks = 0;
 
 int main(int argc, char **argv){
 	welcome();
@@ -38,9 +44,20 @@ int main(int argc, char **argv){
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
+#ifndef __CYGWIN__
+	signal(SIGALRM, signal_handler);
+	{
+		struct itimerval tv;
+		tv.it_interval.tv_sec = (TICK_INTERVAL / 1000);
+		tv.it_interval.tv_usec = (TICK_INTERVAL % 1000) * 1000;
+		tv.it_value.tv_sec = 1;
+		tv.it_value.tv_usec = 0;
+		setitimer(ITIMER_REAL, &tv, NULL);
+	}
+#endif
 	
+	fdes = new Fdevents();
 	run(argc, argv);
-	
 	remove_pidfile();
 
 	if(serv_link){
@@ -55,47 +72,123 @@ int main(int argc, char **argv){
 		log_debug("free conf");
 		delete conf;
 	}
+	if(fdes){
+		delete fdes;
+	}
 	log_info("ssdb server exit.");
 	return 0;
 }
 
-int proc_result(ProcJob &job, Fdevents &select, ready_list_t &ready_list){	
-	Link *link = job.link;
-			
-	if(job.result == PROC_ERROR){
-		log_info("fd: %d, proc error, delete link", link->fd());
-		select.del(link->fd());
-		delete link;
-		return PROC_ERROR;
+Link* accept_link(){
+	Link *link = serv_link->accept();
+	if(link == NULL){
+		log_error("accept failed! %s", strerror(errno));
+		return NULL;
 	}
+	if(!ip_filter->check_pass(link->remote_ip)){
+		log_debug("ip_filter deny link from %s:%d", link->remote_ip, link->remote_port);
+		delete link;
+		return NULL;
+	}
+				
+	link->nodelay();
+	link->noblock();
+	link->create_time = millitime();
+	link->active_time = link->create_time;
+	return link;
+}
+
+int proc_result(ProcJob &job, ready_list_t &ready_list){	
+	Link *link = job.link;
+	int len;
+			
 	if(job.cmd){
 		job.cmd->calls += 1;
 		job.cmd->time_wait += job.time_wait;
 		job.cmd->time_proc += job.time_proc;
 	}
+	if(job.result == PROC_ERROR){
+		log_info("fd: %d, proc error, delete link", link->fd());
+		goto proc_err;
+	}
+	
+	len = link->write();
+	//log_debug("write: %d", len);
+	if(len < 0){
+		log_debug("fd: %d, write: %d, delete link", link->fd(), len);
+		goto proc_err;
+	}
 
 	if(!link->output->empty()){
-		//log_trace("add %d to select.out", link->fd());
-		select.set(link->fd(), FDEVENT_OUT, 1, link);
-		if(select.isset(link->fd(), FDEVENT_IN)){
-			//log_trace("delete %d from select.in", link->fd());
-			select.clr(link->fd(), FDEVENT_IN);
-		}
+		fdes->set(link->fd(), FDEVENT_OUT, 1, link);
+	}
+	if(link->input->empty()){
+		fdes->set(link->fd(), FDEVENT_IN, 1, link);
 	}else{
-		if(link->input->empty()){
-			if(!select.isset(link->fd(), FDEVENT_IN)){
-				//log_trace("add %d to select.in", link->fd());
-				select.set(link->fd(), FDEVENT_IN, 1, link);
-			}
-		}else{
-			if(select.isset(link->fd(), FDEVENT_IN)){
-				//log_trace("delete %d from select.in", link->fd());
-				select.clr(link->fd(), FDEVENT_IN);
-			}
-			ready_list.push_back(link);
-		}
+		fdes->clr(link->fd(), FDEVENT_IN);
+		ready_list.push_back(link);
 	}
 	return PROC_OK;
+
+proc_err:
+	fdes->del(link->fd());
+	delete link;
+	return PROC_ERROR;
+}
+
+/*
+event:
+	read => ready_list OR close
+	write => NONE
+proc =>
+	done: write & (read OR ready_list)
+	async: stop (read & write)
+	
+1. When writing to a link, it may happen to be in the ready_list,
+so we cannot close that link in write process, we could only
+just mark it as closed.
+
+2. When reading from a link, it is never in the ready_list, so it
+is safe to close it in read process, also safe to put it into
+ready_list.
+
+3. Ignore FDEVENT_ERR
+
+A link is in either one of these places:
+	1. ready list
+	2. async worker queue
+So it safe to delete link when processing ready list and async worker result.
+*/
+int proc_client_event(const Fdevent *fde, ready_list_t &ready_list){	
+	Link *link = (Link *)fde->data.ptr;
+	if(fde->events & FDEVENT_IN){
+		ready_list.push_back(link);
+		if(link->error()){
+			return 0;
+		}
+		int len = link->read();
+		//log_debug("fd: %d read: %d", link->fd(), len);
+		if(len <= 0){
+			log_debug("fd: %d, read: %d, delete link", link->fd(), len);
+			link->mark_error();
+			return 0;
+		}
+	}
+	if(fde->events & FDEVENT_OUT){
+		if(link->error()){
+			return 0;
+		}
+		int len = link->write();
+		if(len <= 0){
+			log_debug("fd: %d, write: %d, delete link", link->fd(), len);
+			link->mark_error();
+			return 0;
+		}
+		if(link->output->empty()){
+			fdes->clr(link->fd(), FDEVENT_OUT);
+		}
+	}
+	return 0;
 }
 
 void run(int argc, char **argv){
@@ -105,44 +198,43 @@ void run(int argc, char **argv){
 	const Fdevents::events_t *events;
 	Server serv(ssdb);
 
-	Fdevents select;
-	select.set(serv_link->fd(), FDEVENT_IN, 0, serv_link);
-	select.set(serv.reader->fd(), FDEVENT_IN, 0, serv.reader);
-	select.set(serv.writer->fd(), FDEVENT_IN, 0, serv.writer);
+	fdes->set(serv_link->fd(), FDEVENT_IN, 0, serv_link);
+	fdes->set(serv.reader->fd(), FDEVENT_IN, 0, serv.reader);
+	fdes->set(serv.writer->fd(), FDEVENT_IN, 0, serv.writer);
 	
-	int link_count = 0;
+	uint32_t last_ticks = g_ticks;
+	
 	while(!quit){
-		bool write_pending = false;
-		ready_list.clear();
+		// status report
+		if((uint32_t)(g_ticks - last_ticks) >= STATUS_REPORT_TICKS){
+			last_ticks = g_ticks;
+			log_info("ssdb working, links: %d", serv.link_count);
+		}
+		
+		ready_list.swap(ready_list_2);
 		ready_list_2.clear();
 		
-		if(write_pending || !ready_list.empty()){
-			// give links that are not in ready_list a chance
-			events = select.wait(0);
+		if(!ready_list.empty()){
+			// ready_list not empty, so we should return immediately
+			events = fdes->wait(0);
 		}else{
-			events = select.wait(50);
+			events = fdes->wait(50);
 		}
 		if(events == NULL){
 			log_fatal("events.wait error: %s", strerror(errno));
 			break;
 		}
+		
 		for(int i=0; i<(int)events->size(); i++){
 			const Fdevent *fde = events->at(i);
 			if(fde->data.ptr == serv_link){
-				Link *link = serv_link->accept();
-				if(link == NULL){
-					log_error("accept fail!");
-					continue;
+				Link *link = accept_link();
+				if(link){
+					serv.link_count ++;				
+					log_debug("new link from %s:%d, fd: %d, links: %d",
+						link->remote_ip, link->remote_port, link->fd(), serv.link_count);
+					fdes->set(link->fd(), FDEVENT_IN, 1, link);
 				}
-				link_count ++;
-				log_info("new link from %s:%d, fd: %d, link_count: %d",
-					link->remote_ip, link->remote_port, link->fd(), link_count);
-				
-				link->nodelay();
-				link->noblock();
-				link->create_time = millitime();
-				link->active_time = link->create_time;
-				select.set(link->fd(), FDEVENT_IN, 1, link);
 			}else if(fde->data.ptr == serv.reader || fde->data.ptr == serv.writer){
 				WorkerPool<Server::ProcWorker, ProcJob> *worker = (WorkerPool<Server::ProcWorker, ProcJob> *)fde->data.ptr;
 				ProcJob job;
@@ -150,68 +242,33 @@ void run(int argc, char **argv){
 					log_fatal("reading result from workers error!");
 					exit(0);
 				}
-				if(proc_result(job, select, ready_list_2) == PROC_ERROR){
-					link_count --;
+				if(proc_result(job, ready_list) == PROC_ERROR){
+					serv.link_count --;
 				}
 			}else{
-				Link *link = (Link *)fde->data.ptr;
-				// 不能同时监听读和写事件, 只能监听其中一个
-				if(fde->events & FDEVENT_ERR){
-					log_info("fd: %d error, delete link", link->fd());
-					link_count --;
-					select.del(link->fd());
-					delete link;
-				}else if(fde->events & FDEVENT_IN){
-					int len = link->read();
-					//log_trace("fd: %d read: %d", link->fd(), len);
-					if(len <= 0){
-						log_info("fd: %d, read: %d, delete link", link->fd(), len);
-						link_count --;
-						select.del(link->fd());
-						delete link;
-					}else{
-						ready_list.push_back(link);
-					}
-				}else if(fde->events & FDEVENT_OUT){
-					int len = link->write();
-					//log_trace("fd: %d write: %d", link->fd(), len);
-					if(len <= 0){
-						log_info("fd: %d, write: %d, delete link", link->fd(), len);
-						link_count --;
-						select.del(link->fd());
-						delete link;
-					}else if(link->output->empty()){
-						//log_trace("delete %d from select.out", link->fd());
-						select.clr(link->fd(), FDEVENT_OUT);
-						if(!link->input->empty()){
-							ready_list.push_back(link);
-						}else{
-							//log_trace("add %d to select.in", link->fd());
-							select.set(link->fd(), FDEVENT_IN, 1, link);
-						}
-					}else{
-						write_pending = true;
-					}
-				}
+				proc_client_event(fde, ready_list);
 			}
 		}
 
 		for(it = ready_list.begin(); it != ready_list.end(); it ++){
 			Link *link = *it;
+			if(link->error()){
+				serv.link_count --;
+				fdes->del(link->fd());
+				delete link;
+				continue;
+			}
 
 			const Request *req = link->recv();
 			if(req == NULL){
 				log_warn("fd: %d, link parse error, delete link", link->fd());
-				link_count --;
-				select.del(link->fd());
+				serv.link_count --;
+				fdes->del(link->fd());
 				delete link;
 				continue;
 			}
 			if(req->empty()){
-				if(!select.isset(link->fd(), FDEVENT_IN)){
-					//log_trace("add %d to select.in", link->fd());
-					select.set(link->fd(), FDEVENT_IN, 1, link);
-				}
+				fdes->set(link->fd(), FDEVENT_IN, 1, link);
 				continue;
 			}
 			
@@ -221,28 +278,27 @@ void run(int argc, char **argv){
 			job.link = link;
 			serv.proc(&job);
 			if(job.result == PROC_THREAD){
-				select.del(link->fd());
+				fdes->del(link->fd());
 				continue;
 			}
 			if(job.result == PROC_BACKEND){
-				select.del(link->fd());
-				link_count --;
+				fdes->del(link->fd());
+				serv.link_count --;
 				continue;
 			}
 			
-			if(proc_result(job, select, ready_list_2) == PROC_ERROR){
-				link_count --;
+			if(proc_result(job, ready_list_2) == PROC_ERROR){
+				serv.link_count --;
 			}
 		} // end foreach ready link
-		ready_list.swap(ready_list_2);
 	}
 }
 
 
 void welcome(){
-	printf("ssdb %s\n", SSDB_VERSION);
-	printf("Copyright (c) 2012-2013 ideawu.com\n");
-	printf("\n");
+	fprintf(stderr, "ssdb %s\n", SSDB_VERSION);
+	fprintf(stderr, "Copyright (c) 2012-2014 ssdb.io\n");
+	fprintf(stderr, "\n");
 }
 
 void usage(int argc, char **argv){
@@ -255,16 +311,21 @@ void usage(int argc, char **argv){
 void signal_handler(int sig){
 	switch(sig){
 		case SIGTERM:
-		case SIGINT:
+		case SIGINT:{
 			quit = true;
 			break;
+		}
+		case SIGALRM:{
+			g_ticks ++;
+			break;
+		}
 	}
 }
 
 void init(int argc, char **argv){
 	if(argc < 2){
 		usage(argc, argv);
-		exit(0);
+		exit(1);
 	}
 
 	bool is_daemon = false;
@@ -279,24 +340,24 @@ void init(int argc, char **argv){
 
 	if(conf_file == NULL){
 		usage(argc, argv);
-		exit(0);
+		exit(1);
 	}
 
 	if(!is_file(conf_file)){
 		fprintf(stderr, "'%s' is not a file or not exists!\n", conf_file);
-		exit(0);
+		exit(1);
 	}
 
 	conf = Config::load(conf_file);
 	if(!conf){
-		fprintf(stderr, "error loading conf file: '%s'", conf_file);
-		exit(0);
+		fprintf(stderr, "error loading conf file: '%s'\n", conf_file);
+		exit(1);
 	}
 	{
 		std::string conf_dir = real_dirname(conf_file);
 		if(chdir(conf_dir.c_str()) == -1){
 			fprintf(stderr, "error chdir: %s\n", conf_dir.c_str());
-			exit(0);
+			exit(1);
 		}
 	}
 
@@ -308,12 +369,12 @@ void init(int argc, char **argv){
 		}
 		if(!is_dir(work_dir.c_str())){
 			fprintf(stderr, "'%s' is not a directory or not exists!\n", work_dir.c_str());
-			exit(0);
+			exit(1);
 		}
 		/*
 		if(chdir(work_dir.c_str()) == -1){
 			fprintf(stderr, "error chdir: %s\n", work_dir.c_str());
-			exit(0);
+			exit(1);
 		}
 		*/
 	}
@@ -330,8 +391,8 @@ void init(int argc, char **argv){
 			log_output = "stdout";
 		}
 		if(log_open(log_output.c_str(), log_level, true, log_rotate_size) == -1){
-			fprintf(stderr, "error open log file: %s", log_output.c_str());
-			exit(0);
+			fprintf(stderr, "error opening log file: %s\n", log_output.c_str());
+			exit(1);
 		}
 	}
 
@@ -341,7 +402,44 @@ void init(int argc, char **argv){
 	log_info("log_level       : %s", conf->get_str("logger.level"));
 	log_info("log_output      : %s", log_output.c_str());
 	log_info("log_rotate_size : %d", log_rotate_size);
+	
+	ip_filter = new IpFilter();
+	// init ip_filter
+	{
+		Config *cc = (Config *)conf->get("server");
+		if(cc != NULL){
+			std::vector<Config *> *children = &cc->children;
+			std::vector<Config *>::iterator it;
+			for(it = children->begin(); it != children->end(); it++){
+				if((*it)->key == "allow"){
+					const char *ip = (*it)->str();
+					log_info("    allow %s", ip);
+					ip_filter->add_allow(ip);
+				}
+				if((*it)->key == "deny"){
+					const char *ip = (*it)->str();
+					log_info("    deny %s", ip);
+					ip_filter->add_deny(ip);
+				}
+			}
+		}
+	}
 
+	{ // server
+		const char *ip = conf->get_str("server.ip");
+		int port = conf->get_num("server.port");
+		
+		serv_link = Link::listen(ip, port);
+		if(serv_link == NULL){
+			log_fatal("error opening server socket! %s", strerror(errno));
+			fprintf(stderr, "error opening server socket! %s\n", strerror(errno));
+			exit(1);
+		}
+		log_info("server listen on: %s:%d", ip, port);
+	}
+
+	// WARN!!!
+	// deamonize() MUST be called before any thread has been created!
 	if(is_daemon){
 		daemonize();
 	}
@@ -349,25 +447,14 @@ void init(int argc, char **argv){
 	{ // ssdb
 		ssdb = SSDB::open(*conf, work_dir);
 		if(!ssdb){
-			log_fatal("could not open SSDB!");
+			log_fatal("could not open work_dir: %s", work_dir.c_str());
+			fprintf(stderr, "could not open work_dir: %s\n", work_dir.c_str());
 			exit(0);
 		}
 	}
 
-	{ // server
-		const char *ip = conf->get_str("server.ip");
-		short port = (short)conf->get_num("server.port");
-
-		serv_link = Link::listen(ip, port);
-		if(serv_link == NULL){
-			log_fatal("error opening server socket! %s", strerror(errno));
-			exit(0);
-		}
-		log_info("server listen on: %s:%d", ip, port);
-	}
-	
 	write_pidfile();
-
+	
 	log_info("ssdb server started.");
 }
 
@@ -377,7 +464,7 @@ void write_pidfile(){
 		FILE *fp = fopen(pidfile, "w");
 		if(!fp){
 			log_error("Failed to open pidfile '%s': %s", pidfile, strerror(errno));
-			exit(0);
+			exit(1);
 		}
 		char buf[128];
 		pid_t pid = getpid();
@@ -395,7 +482,7 @@ void check_pidfile(){
 			fprintf(stderr, "Fatal error!\nPidfile %s already exists!\n"
 				"You must kill the process and then "
 				"remove this file before starting ssdb-server.\n", pidfile);
-			exit(0);
+			exit(1);
 		}
 	}
 }

@@ -5,7 +5,7 @@
 
 /* Binlog */
 
-Binlog::Binlog(uint64_t seq, char type, char cmd, const rocksdb::Slice &key){
+Binlog::Binlog(uint64_t seq, char type, char cmd, const leveldb::Slice &key){
 	buf.append((char *)(&seq), sizeof(uint64_t));
 	buf.push_back(type);
 	buf.push_back(cmd);
@@ -28,7 +28,7 @@ const Bytes Binlog::key() const{
 	return Bytes(buf.data() + HEADER_LEN, buf.size() - HEADER_LEN);
 }
 
-int Binlog::load(const rocksdb::Slice &s){
+int Binlog::load(const leveldb::Slice &s){
 	if(s.size() < HEADER_LEN){
 		return -1;
 	}
@@ -87,6 +87,18 @@ std::string Binlog::dumps() const{
 		case BinlogCommand::END:
 			str.append("end ");
 			break;
+		case BinlogCommand::QPUSH_BACK:
+			str.append("qpush_back ");
+			break;
+		case BinlogCommand::QPUSH_FRONT:
+			str.append("qpush_front ");
+			break;
+		case BinlogCommand::QPOP_BACK:
+			str.append("qpop_back ");
+			break;
+		case BinlogCommand::QPOP_FRONT:
+			str.append("qpop_front ");
+			break;
 	}
 	Bytes b = this->key();
 	str.append(hexmem(b.data(), b.size()));
@@ -104,7 +116,7 @@ static inline std::string encode_seq_key(uint64_t seq){
 	return ret;
 }
 
-static inline uint64_t decode_seq_key(const rocksdb::Slice &key){
+static inline uint64_t decode_seq_key(const leveldb::Slice &key){
 	uint64_t seq = 0;
 	if(key.size() == (sizeof(uint64_t) + 1) && key.data()[0] == DataType::SYNCLOG){
 		seq = *((uint64_t *)(key.data() + 1));
@@ -113,21 +125,28 @@ static inline uint64_t decode_seq_key(const rocksdb::Slice &key){
 	return seq;
 }
 
-BinlogQueue::BinlogQueue(rocksdb::DB *db){
+BinlogQueue::BinlogQueue(leveldb::DB *db){
 	this->db = db;
 	this->min_seq = 0;
 	this->last_seq = 0;
 	this->tran_seq = 0;
 	this->capacity = LOG_QUEUE_SIZE;
+	this->no_log_ = false;
 	
 	Binlog log;
 	if(this->find_last(&log) == 1){
 		this->last_seq = log.seq();
 	}
-	if(this->find_next(1, &log) == 1){
+	if(this->last_seq > LOG_QUEUE_SIZE){
+		this->min_seq = this->last_seq - LOG_QUEUE_SIZE;
+	}else{
+		this->min_seq = 0;
+	}
+	// TODO: use binary search to find out min_seq
+	if(this->find_next(this->min_seq, &log) == 1){
 		this->min_seq = log.seq();
 	}
-	log_debug("capacity: %d, min: %" PRIu64 ", max: %" PRIu64 ",", capacity, min_seq, last_seq);
+	log_info("binlogs capacity: %d, min: %" PRIu64 ", max: %" PRIu64 ",", capacity, min_seq, last_seq);
 
 	//this->merge();
 		/*
@@ -159,12 +178,13 @@ BinlogQueue::BinlogQueue(rocksdb::DB *db){
 
 BinlogQueue::~BinlogQueue(){
 	thread_quit = true;
-	while(1){
+	for(int i=0; i<100; i++){
 		if(thread_quit == false){
 			break;
 		}
 		usleep(10 * 1000);
 	}
+	db = NULL;
 	log_debug("BinlogQueue finalized");
 }
 
@@ -177,9 +197,9 @@ void BinlogQueue::rollback(){
 	tran_seq = 0;
 }
 
-rocksdb::Status BinlogQueue::commit(){
-	rocksdb::WriteOptions write_opts;
-	rocksdb::Status s = db->Write(write_opts, &batch);
+leveldb::Status BinlogQueue::commit(){
+	leveldb::WriteOptions write_opts;
+	leveldb::Status s = db->Write(write_opts, &batch);
 	if(s.ok()){
 		last_seq = tran_seq;
 		tran_seq = 0;
@@ -187,24 +207,34 @@ rocksdb::Status BinlogQueue::commit(){
 	return s;
 }
 
-void BinlogQueue::add(char type, char cmd, const rocksdb::Slice &key){
+void BinlogQueue::no_log(){
+	no_log_ = true;
+}
+
+void BinlogQueue::add_log(char type, char cmd, const leveldb::Slice &key){
+	if(no_log_){
+		return;
+	}
 	tran_seq ++;
 	Binlog log(tran_seq, type, cmd, key);
 	batch.Put(encode_seq_key(tran_seq), log.repr());
 }
 
-void BinlogQueue::add(char type, char cmd, const std::string &key){
-	rocksdb::Slice s(key);
-	this->add(type, cmd, s);
+void BinlogQueue::add_log(char type, char cmd, const std::string &key){
+	if(no_log_){
+		return;
+	}
+	leveldb::Slice s(key);
+	this->add_log(type, cmd, s);
 }
 
-// rocksdb put
-void BinlogQueue::Put(const rocksdb::Slice& key, const rocksdb::Slice& value){
+// leveldb put
+void BinlogQueue::Put(const leveldb::Slice& key, const leveldb::Slice& value){
 	batch.Put(key, value);
 }
 
-// rocksdb delete
-void BinlogQueue::Delete(const rocksdb::Slice& key){
+// leveldb delete
+void BinlogQueue::Delete(const leveldb::Slice& key){
 	batch.Delete(key);
 }
 	
@@ -214,13 +244,13 @@ int BinlogQueue::find_next(uint64_t next_seq, Binlog *log) const{
 	}
 	uint64_t ret = 0;
 	std::string key_str = encode_seq_key(next_seq);
-	rocksdb::ReadOptions iterate_options;
-	rocksdb::Iterator *it = db->NewIterator(iterate_options);
+	leveldb::ReadOptions iterate_options;
+	leveldb::Iterator *it = db->NewIterator(iterate_options);
 	it->Seek(key_str);
 	if(it->Valid()){
-		rocksdb::Slice key = it->key();
+		leveldb::Slice key = it->key();
 		if(decode_seq_key(key) != 0){
-			rocksdb::Slice val = it->value();
+			leveldb::Slice val = it->value();
 			if(log->load(val) == -1){
 				ret = -1;
 			}else{
@@ -235,8 +265,8 @@ int BinlogQueue::find_next(uint64_t next_seq, Binlog *log) const{
 int BinlogQueue::find_last(Binlog *log) const{
 	uint64_t ret = 0;
 	std::string key_str = encode_seq_key(UINT64_MAX);
-	rocksdb::ReadOptions iterate_options;
-	rocksdb::Iterator *it = db->NewIterator(iterate_options);
+	leveldb::ReadOptions iterate_options;
+	leveldb::Iterator *it = db->NewIterator(iterate_options);
 	it->Seek(key_str);
 	if(!it->Valid()){
 		// Iterator::prev requires Valid, so we seek to last
@@ -246,9 +276,9 @@ int BinlogQueue::find_last(Binlog *log) const{
 		it->Prev();
 	}
 	if(it->Valid()){
-		rocksdb::Slice key = it->key();
+		leveldb::Slice key = it->key();
 		if(decode_seq_key(key) != 0){
-			rocksdb::Slice val = it->value();
+			leveldb::Slice val = it->value();
 			if(log->load(val) == -1){
 				ret = -1;
 			}else{
@@ -262,7 +292,7 @@ int BinlogQueue::find_last(Binlog *log) const{
 
 int BinlogQueue::get(uint64_t seq, Binlog *log) const{
 	std::string val;
-	rocksdb::Status s = db->Get(rocksdb::ReadOptions(), encode_seq_key(seq), &val);
+	leveldb::Status s = db->Get(leveldb::ReadOptions(), encode_seq_key(seq), &val);
 	if(s.ok()){
 		if(log->load(val) != -1){
 			return 1;
@@ -273,7 +303,7 @@ int BinlogQueue::get(uint64_t seq, Binlog *log) const{
 
 int BinlogQueue::update(uint64_t seq, char type, char cmd, const std::string &key){
 	Binlog log(seq, type, cmd, key);
-	rocksdb::Status s = db->Put(rocksdb::WriteOptions(), encode_seq_key(seq), log.repr());
+	leveldb::Status s = db->Put(leveldb::WriteOptions(), encode_seq_key(seq), log.repr());
 	if(s.ok()){
 		return 0;
 	}
@@ -281,7 +311,7 @@ int BinlogQueue::update(uint64_t seq, char type, char cmd, const std::string &ke
 }
 
 int BinlogQueue::del(uint64_t seq){
-	rocksdb::Status s = db->Delete(rocksdb::WriteOptions(), encode_seq_key(seq));
+	leveldb::Status s = db->Delete(leveldb::WriteOptions(), encode_seq_key(seq));
 	if(!s.ok()){
 		return -1;
 	}
@@ -294,11 +324,11 @@ void BinlogQueue::flush(){
 
 int BinlogQueue::del_range(uint64_t start, uint64_t end){
 	while(start <= end){
-		rocksdb::WriteBatch batch;
+		leveldb::WriteBatch batch;
 		for(int count = 0; start <= end && count < 1000; start++, count++){
 			batch.Delete(encode_seq_key(start));
 		}
-		rocksdb::Status s = db->Write(rocksdb::WriteOptions(), &batch);
+		leveldb::Status s = db->Write(leveldb::WriteOptions(), &batch);
 		if(!s.ok()){
 			return -1;
 		}
@@ -310,7 +340,11 @@ void* BinlogQueue::log_clean_thread_func(void *arg){
 	BinlogQueue *logs = (BinlogQueue *)arg;
 	
 	while(!logs->thread_quit){
+		if(!logs->db){
+			break;
+		}
 		usleep(100 * 1000);
+		assert(logs->last_seq >= logs->min_seq);
 
 		if(logs->last_seq - logs->min_seq < LOG_QUEUE_SIZE * 1.1){
 			continue;
@@ -337,6 +371,7 @@ void BinlogQueue::merge(){
 	int reduce_count = 0;
 	int total = 0;
 	total = end - start + 1;
+	(void)total; // suppresses warning
 	log_trace("merge begin");
 	for(; start <= end; start++){
 		Binlog log;
