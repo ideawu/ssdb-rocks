@@ -421,9 +421,188 @@ exports.connect = function(host, port, timeout, listener){
 		});
 	}
 
+	//////////////////////////////////////////////
+
+	// callback(err, size)
+	self.qsize = function(name, callback){
+		self.request('qsize', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2){
+					var size = parseInt(resp[1]);
+					callback(err, size);
+				}else{
+					callback('error');
+				}
+			}
+		});
+	}
+
+
+	// callback(err, count)
+	self.qclear = function(name, callback){
+		self.request('qclear', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var count = parseInt(resp[1]);
+					callback(err, count);
+				} else {
+					callback('error');
+				}
+			}
+		});
+	}
+
+	// callback(err, item)
+	self.qfront = function(name, callback){
+		self.request('qfront', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var item = resp[1];
+					callback(err, item);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, item)
+	self.qback = function(name, callback){
+		self.request('qback', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var item = resp[1];
+					callback(err, item);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, item)
+	self.qget = function(name, index, callback){
+		self.request('qget', [name, index], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var item = resp[1];
+					callback(err, item);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, items)
+	self.qslice = function(name, begin, end, callback){
+		self.request('qslice', [name, begin, end], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length >= 2) {
+					var items = [];
+					for(var i = 1, l = resp.length; i < l; i++) {
+						items.push(resp[i]);
+					}
+					callback(err, items);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, size)
+	self.qpush_front = function(name, item, callback){
+		var param = [name];
+		if(Object.prototype.toString.call(item) === '[object String]') {
+			param.push(item);
+		} else {
+			item.forEach(function(v, k){
+				param.push(v);
+			});
+		}
+		self.request('qpush_front', param, function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					self.qsize(name, function(_err, size) {
+						callback(err, size);
+					});
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, size)
+	self.qpush_back = function(name, item, callback){
+		var param = [name];
+		if(Object.prototype.toString.call(item) === '[object String]') {
+			param.push(item);
+		} else {
+			item.forEach(function(v, k){
+				param.push(v);
+			});
+		}
+		self.request('qpush_back', param, function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					self.qsize(name, function(_err, size) {
+						callback(err, size);
+					});
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, size)
+	self.qpush = self.qpush_back;
+
+	// callback(err, size)
+	self.qpop_front = function(name, callback){
+		self.request('qpop_front', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var item = resp[1];
+					callback(err, item);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
+	// callback(err, size)
+	self.qpop = self.qpop_front;
+
+	// callback(err, size)
+	self.qpop_back = function(name, callback){
+		self.request('qpop_back', [name], function(resp){
+			if(callback){
+				var err = resp[0] == 'ok'? 0 : resp[0];
+				if(resp.length == 2) {
+					var item = resp[1];
+					callback(err, item);
+				} else {
+					callback('error', null);
+				}
+			}
+		});
+	}
+
 	return self;
 }
-
 
 /*
 example:
