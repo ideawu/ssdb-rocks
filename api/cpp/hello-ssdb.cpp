@@ -14,15 +14,16 @@ int main(int argc, char **argv){
 		return 0;
 	}
 
-	for(int i=0; i<10000; i++){
-		ssdb::Status s;
-		s = client->set("k", "hello ssdb!");
-		if(s.ok()){
-			//printf("k = hello ssdb!\n");
-		}else{
-			printf("error!\n");
-		}
+	ssdb::Status s;
+	s = client->set("k", "hello ssdb!");
+	if(s.ok()){
+		printf("k = hello ssdb!\n");
+	}else{
+		printf("error!\n");
 	}
+	std::string val;
+	s = client->get("k", &val);
+	printf("length: %d\n", (int)val.size());
 
 	delete client;
 	return 0;

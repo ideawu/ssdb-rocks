@@ -76,6 +76,9 @@ class SSDB
 		$timeout_sec = intval($timeout_ms/1000);
 		$timeout_usec = ($timeout_ms - $timeout_sec * 1000) * 1000;
 		@stream_set_timeout($this->sock, $timeout_sec, $timeout_usec);
+		if(function_exists('stream_set_chunk_size')){
+			@stream_set_chunk_size($this->sock, 1024 * 1024);
+		}
 	}
 	
 	/**
@@ -128,6 +131,12 @@ class SSDB
 		$this->batch_mode = false;
 		$this->batch_cmds = array();
 		return $ret;
+	}
+	
+	function request(){
+		$args = func_get_args();
+		$cmd = array_shift($args);
+		return $this->__call($cmd, $args);
 	}
 
 	function __call($cmd, $params=array()){
@@ -269,7 +278,12 @@ class SSDB
 		return $this->__call(__FUNCTION__, $args);
 	}
 
-	function incr($key, $val){
+	function setx($key, $val, $ttl){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
+	function incr($key, $val=1){
 		$args = func_get_args();
 		return $this->__call(__FUNCTION__, $args);
 	}
@@ -362,7 +376,7 @@ class SSDB
 		return $this->__call(__FUNCTION__, $args);
 	}
 
-	function zincr($name, $key, $score){
+	function zincr($name, $key, $score=1){
 		$args = func_get_args();
 		return $this->__call(__FUNCTION__, $args);
 	}
@@ -434,6 +448,11 @@ class SSDB
 		return $this->__call(__FUNCTION__, $args);
 	}
 
+	function hgetall($name){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
 	function hscan($name, $key_start, $key_end, $limit){
 		$args = func_get_args();
 		return $this->__call(__FUNCTION__, $args);
@@ -449,7 +468,7 @@ class SSDB
 		return $this->__call(__FUNCTION__, $args);
 	}
 
-	function hincr($name, $key, $val){
+	function hincr($name, $key, $val=1){
 		$args = func_get_args();
 		return $this->__call(__FUNCTION__, $args);
 	}
@@ -469,6 +488,28 @@ class SSDB
 		return $this->__call(__FUNCTION__, $args);
 	}
 	
+	/*****/
+
+	function qfront($name){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
+	function qback($name){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
+	function qpop($name){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
+	function qpush($name, $item){
+		$args = func_get_args();
+		return $this->__call(__FUNCTION__, $args);
+	}
+
 	private function send_req($cmd, $params){
 		$req = array($cmd);
 		foreach($params as $p){
@@ -489,16 +530,27 @@ class SSDB
 			return new SSDB_Response('disconnected', 'Connection closed');
 		}
 		switch($cmd){
+			case 'getbit':
+			case 'setbit':
+			case 'countbit':
+			case 'strlen':
 			case 'set':
+			case 'setx':
+			case 'setnx':
 			case 'zset':
 			case 'hset':
+			case 'qpush':
+			case 'qpush_front':
+			case 'qpush_back':
 			case 'del':
 			case 'zdel':
 			case 'hdel':
 			case 'hsize':
 			case 'zsize':
+			case 'qsize':
 			case 'hclear':
 			case 'zclear':
+			case 'qclear':
 			case 'multi_set':
 			case 'multi_del':
 			case 'multi_hset':
@@ -514,10 +566,25 @@ class SSDB
 			case 'zget':
 			case 'zrank':
 			case 'zrrank':
+			case 'zcount':
+			case 'zsum':
+			case 'zremrangebyrank':
+			case 'zremrangebyscore':
 				$val = isset($resp[1])? intval($resp[1]) : 0;
 				return new SSDB_Response($resp[0], $val);
+			case 'zavg':
+				$val = isset($resp[1])? floatval($resp[1]) : (float)0;
+				return new SSDB_Response($resp[0], $val);
 			case 'get':
+			case 'substr':
+			case 'getset':
 			case 'hget':
+			case 'qget':
+			case 'qfront':
+			case 'qback':
+			case 'qpop':
+			case 'qpop_front':
+			case 'qpop_back':
 				if($resp[0] == 'ok'){
 					if(count($resp) == 2){
 						return new SSDB_Response('ok', $resp[1]);
@@ -534,6 +601,7 @@ class SSDB
 			case 'hkeys':
 			case 'hlist':
 			case 'zlist':
+			case 'qslice':
 				$data = array();
 				if($resp[0] == 'ok'){
 					for($i=1; $i<count($resp); $i++){
@@ -580,6 +648,7 @@ class SSDB
 			case 'zrrange':
 			case 'hscan':
 			case 'hrscan':
+			case 'hgetall':
 			case 'multi_hsize':
 			case 'multi_zsize':
 			case 'multi_get':
@@ -589,7 +658,11 @@ class SSDB
 					if(count($resp) % 2 == 1){
 						$data = array();
 						for($i=1; $i<count($resp); $i+=2){
-							$data[$resp[$i]] = $resp[$i + 1];
+							if($cmd[0] == 'z'){
+								$data[$resp[$i]] = intval($resp[$i + 1]);
+							}else{
+								$data[$resp[$i]] = $resp[$i + 1];
+							}
 						}
 						return new SSDB_Response('ok', $data);
 					}else{
@@ -640,7 +713,7 @@ class SSDB
 			$ret = $this->parse();
 			if($ret === null){
 				try{
-					$data = @fread($this->sock, 1024*128);
+					$data = @fread($this->sock, 1024 * 1024);
 					if($this->debug){
 						echo '< ' . str_replace(array("\r", "\n"), array('\r', '\n'), $data) . "\n";
 					}
@@ -663,7 +736,8 @@ class SSDB
 		$ret = array();
 		$spos = 0;
 		$epos = 0;
-		$this->recv_buf = ltrim($this->recv_buf);
+		// performance issue for large reponse
+		//$this->recv_buf = ltrim($this->recv_buf);
 		while(true){
 			$spos = $epos;
 			$epos = strpos($this->recv_buf, "\n", $spos);

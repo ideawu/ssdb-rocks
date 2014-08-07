@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string>
@@ -37,6 +38,9 @@ int main(int argc, char **argv){
 	
 	printf("\n");
 	{
+		s = client->setx(key, "test_val", 3);
+		assert(s.ok());
+
 		s = client->set(key, "test_val");
 		assert(s.ok());
 

@@ -72,6 +72,9 @@ class SSDB{
 			case 'set':
 			case 'zset':
 			case 'hset':
+			case 'qpush':
+			case 'qpush_front':
+			case 'qpush_back':
 			case 'del':
 			case 'zdel':
 			case 'hdel':
@@ -87,8 +90,16 @@ class SSDB{
 					return new SSDB_Response(resp[0], 1);
 				}
 				break;
+			case 'substr':
 			case 'get':
+			case 'getset':
 			case 'hget':
+			case 'qfront':
+			case 'qback':
+			case 'qget':
+			case 'qpop':
+			case 'qpop_front':
+			case 'qpop_back':
 				if(resp[0] == 'ok'){
 					if(len(resp) == 2){
 						return new SSDB_Response('ok', resp[1]);
@@ -99,6 +110,13 @@ class SSDB{
 					return new SSDB_Response(resp[0]);
 				}
 				break;
+			case 'getbit':
+			case 'setbit':
+			case 'countbit':
+			case 'strlen':
+			case 'ttl':
+			case 'expire':
+			case 'setnx':
 			case 'incr':
 			case 'decr':
 			case 'zincr':
@@ -107,13 +125,29 @@ class SSDB{
 			case 'hdecr':
 			case 'hsize':
 			case 'zsize':
+			case 'qsize':
 			case 'zget':
 			case 'zrank':
 			case 'zrrank':
+			case 'zsum':
+			case 'zcount':
+			case 'zavg':
+			case 'zremrangebyrank':
+			case 'zremrangebyscore':
+			case 'hclear':
+			case 'zclear':
+			case 'qclear':
+			case 'qpush':
+			case 'qpush_front':
+			case 'qpush_back':
 				if(resp[0] == 'ok'){
 					if(len(resp) == 2){
 						try{
-							val = int(resp[1]);
+							if(cmd == 'zavg'){
+								val = float(resp[1]);
+							}else{
+								val = int(resp[1]);
+							}
 							return new SSDB_Response('ok', val);
 						}catch(Exception e){
 							return new SSDB_Response('server_error', 'Invalid response');
@@ -128,6 +162,7 @@ class SSDB{
 			case 'keys':
 			case 'zkeys':
 			case 'hkeys':
+			case 'list':
 			case 'hlist':
 			case 'zlist':
 				data = [];
@@ -140,6 +175,7 @@ class SSDB{
 				break;
 			case 'scan':
 			case 'rscan':
+			case 'hgetall':
 			case 'hscan':
 			case 'hrscan':
 				if(resp[0] == 'ok'){

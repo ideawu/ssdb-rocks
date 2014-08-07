@@ -55,6 +55,7 @@ Client* Client::connect(const char *ip, int port){
 	ClientImpl *client = new ClientImpl();
 	client->link = Link::connect(ip, port);
 	if(client->link == NULL){
+		delete client;
 		return NULL;
 	}
 	return client;
@@ -141,6 +142,13 @@ Status ClientImpl::get(const std::string &key, std::string *val){
 Status ClientImpl::set(const std::string &key, const std::string &val){
 	const std::vector<std::string> *resp;
 	resp = this->request("set", key, val);
+	Status s(resp);
+	return s;
+}
+
+Status ClientImpl::setx(const std::string &key, const std::string &val, int ttl){
+	const std::vector<std::string> *resp;
+	resp = this->request("setx", key, val, int_to_str(ttl));
 	Status s(resp);
 	return s;
 }
