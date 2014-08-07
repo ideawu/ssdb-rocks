@@ -3,11 +3,11 @@
 #include <string>
 #include <vector>
 
-#include "rocksdb/db.h"
-#include "rocksdb/env.h"
-#include "rocksdb/options.h"
-#include "rocksdb/slice.h"
-#include "rocksdb/iterator.h"
+#include "leveldb/db.h"
+#include "leveldb/env.h"
+#include "leveldb/options.h"
+#include "leveldb/slice.h"
+#include "leveldb/iterator.h"
 
 #include "link.h"
 #include "util/log.h"
@@ -16,13 +16,13 @@
 
 void welcome(){
 	printf("ssdb-repair - SSDB repair tool\n");
-	printf("Copyright (c) 2013 ideawu.com\n");
+	printf("Copyright (c) 2013-2014 ssdb.io\n");
 	printf("\n");
 }
 
 void usage(int argc, char **argv){
 	printf("Usage:\n");
-	printf("    %s rocksdb_folder\n", argv[0]);
+	printf("    %s leveldb_folder\n", argv[0]);
 	printf("\n");
 }
 
@@ -35,34 +35,32 @@ int main(int argc, char **argv){
 		usage(argc, argv);
 		return 0;
 	}
-	std::string rocksdb_folder(argv[1]);
+	std::string leveldb_folder(argv[1]);
 
-	if(!file_exists(rocksdb_folder.c_str())){
-		printf("rocksdb_folder[%s] not exists!\n", rocksdb_folder.c_str());
+	if(!file_exists(leveldb_folder.c_str())){
+		printf("leveldb_folder[%s] not exists!\n", leveldb_folder.c_str());
 		return 0;
 	}
 	
-	rocksdb::Status status;
+	leveldb::Status status;
 	
-	/*
-	rocksdb::Logger *logger;
-	status = rocksdb::Env::Default()->NewLogger("repair.log", &logger);
+	leveldb::Logger *logger;
+	status = leveldb::Env::Default()->NewLogger("repair.log", &logger);
 	if(!status.ok()){
 		printf("logger error!\n");
 		return 0;
 	}
 	printf("writing repair log into: repair.log\n");
-	*/
 
-	rocksdb::Options options;
-	//options.info_log = logger;
-	status = rocksdb::RepairDB(rocksdb_folder.c_str(), options);
+	leveldb::Options options;
+	options.info_log = logger;
+	status = leveldb::RepairDB(leveldb_folder.c_str(), options);
 	if(!status.ok()){
-		printf("repair rocksdb: %s error!\n", rocksdb_folder.c_str());
+		printf("repair leveldb: %s error!\n", leveldb_folder.c_str());
 		return 0;
 	}
 	
-	printf("rocksdb repaired.\n");
+	printf("leveldb repaired.\n");
 
 	return 0;
 }

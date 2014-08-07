@@ -7,22 +7,25 @@ try{
 }catch(Exception e){
 }
 
+escape_data = false;
 
 function welcome(){
 	sys.stderr.write('ssdb (cli) - ssdb command line tool.\n');
-	sys.stderr.write('Copyright (c) 2012-2013 ideawu.com\n');
+	sys.stderr.write('Copyright (c) 2012-2014 ssdb.io\n');
 	sys.stderr.write('\n');
 	sys.stderr.write("'h' or 'help' for help, 'q' to quit.\n");
 	sys.stderr.write('\n');
 }
-welcome();
 
 function show_command_help(){
 	print '';
 	print '# Display ssdb-server status';
 	print '	info';
+	print '# Escape/Do not escape response data';
+	print '	: escape yes|no';
 	print '# KEY-VALUE COMMANDS';
 	print '	set key value';
+	print '	setx key value ttl';
 	print '	get key';
 	print '	del key';
 	print '	list key_start key_end limit';
@@ -67,7 +70,7 @@ function show_command_help(){
 function usage(){
 	print '';
 	print 'Usage:';
-	print '	ssdb-cli [-h HOST -p PORT]';
+	print '	ssdb-cli [-h] [HOST] [-p] [PORT]';
 	print '';
 	print 'Options:';
 	print '	-h 127.0.0.1';
@@ -77,11 +80,16 @@ function usage(){
 	print '';
 	print 'Examples:';
 	print '	ssdb-cli';
-	print '	ssdb-cli -p 8888';
+	print '	ssdb-cli 8888';
+	print '	ssdb-cli 127.0.0.1 8888';
 	print '	ssdb-cli -h 127.0.0.1 -p 8888';
 }
 
 function repr_data(str){
+	gs = globals();
+	if(gs['escape_data'] == false){
+		return str;
+	}
 	ret = repr(str);
 	if(len(ret) > 0){
 		if(ret[0] == '\''){
@@ -101,30 +109,12 @@ function hclear(link, hname, verbose=true){
 	ret = 0;
 	num = 0;
 	batch = 1000;
+	last_count = 0;
 	
 	r = link.request('hclear', [hname]);
 	try{
-		ret += int(r.data[0]);
+		ret = r.data;
 	}catch(Exception e){
-	}
-	
-	while(true){
-		r2 = link.request('hkeys', [hname, '', '', batch]);
-		num = len(r2.data);
-		if(num == 0){
-			break;
-		}
-		ret += num;
-		keys = r2.data;
-		keys.insert(0, hname);
-		link.request('multi_hdel', keys);
-		if(ret - last_count >= batch || (verbose != false && num < batch)){
-			last_count = ret;
-			printf('hclear \'%s\' %d key(s).\n', hname, ret);
-		}
-		if(num != batch){
-			break;
-		}
 	}
 	return ret;
 }
@@ -137,36 +127,31 @@ function zclear(link, zname, verbose=true){
 
 	r = link.request('zclear', [zname]);
 	try{
-		ret += int(r.data[0]);
+		ret = r.data;
 	}catch(Exception e){
 	}
-	
-	while(true){
-		r2 = link.request('zkeys', [zname, '', '', '', batch]);
-		num = len(r2.data);
-		if(num == 0){
-			break;
-		}
-		ret += num;
-		keys = r2.data;
-		keys.insert(0, zname);
-		link.request('multi_zdel', keys);
-		if(ret - last_count >= batch || (verbose != false && num < batch)){
-			last_count = ret;
-			printf('zclear \'%s\' %d key(s).\n', zname, ret);
-		}
-		if(num != batch){
-			break;
-		}
+	return ret;
+}
+
+function qclear(link, zname, verbose=true){
+	ret = 0;
+	num = 0;
+	batch = 1000;
+	last_count = 0;
+
+	r = link.request('qclear', [zname]);
+	try{
+		ret = r.data;
+	}catch(Exception e){
 	}
 	return ret;
 }
 
 function flushdb(link, data_type){
 	printf('\n');
-	printf('===========================DANGEROUS!============================\n');
+	printf('============================ DANGER! ============================\n');
 	printf('This operation is DANGEROUS and is not recoverable, if you\n');
-	printf('realy want to flush the whole db(delete ALL data in ssdb server),\n');
+	printf('really want to flush the whole db(delete ALL data in ssdb server),\n');
 	printf('input \'yes\' and press Enter, or just press Enter to cancel\n');
 	printf('=================================================================\n');
 	printf('\n');
@@ -244,6 +229,31 @@ function flushdb(link, data_type){
 		}
 		printf('delete[zset] %d zset(s), %d key(s).\n', d_zset, d_zkeys);
 	}
+	
+	d_list = 0;
+	d_lkeys = 0;
+	if(data_type == '' || data_type == 'list'){
+		while(true){
+			resp = link.request('qlist', ['', '', batch]);
+			if(len(resp.data) == 0){
+				break;
+			}
+			last_num = 0;
+			foreach(resp.data as zname){
+				d_list += 1;
+				deleted_num = qclear(link, zname, false);
+				d_lkeys += deleted_num;
+				if(d_zkeys - last_num >= batch){
+					last_num = d_lkeys;
+					printf('delete[list] %d list(s), %d key(s).\n', d_list, d_lkeys);
+				}
+			}
+			if(d_lkeys - last_num >= batch){
+				printf('delete[list] %d list(s), %d key(s).\n', d_list, d_lkeys);
+			}
+		}
+		printf('delete[list] %d list(s), %d key(s).\n', d_list, d_lkeys);
+	}
 
 	printf('\n');
 	printf('===== flushdb stats =====\n');
@@ -255,6 +265,9 @@ function flushdb(link, data_type){
 	}
 	if(data_type == '' || data_type == 'zset'){
 		printf('[zset] %8d zset(s), %8d key(s).\n', d_zset, d_zkeys);
+	}
+	if(data_type == '' || data_type == 'list'){
+		printf('[list] %8d list(s), %8d key(s).\n', d_list, d_lkeys);
 	}
 	printf('\n');
 	
@@ -276,34 +289,56 @@ function timespan(stime){
 }
 
 
-
-default_opts = {
-	'-h' : '127.0.0.1',
-	'-p' : '8888',
-};
-
-opt_err = false;
-try{
-	opts, args = getopt.getopt(sys.argv[1 .. ], 'h:p:');
-	opts = dict(opts);
-}catch(getopt.GetoptError e){
-	opts = {};
-	opt_err = true;
-}
-foreach(default_opts as k=>v){
-	if(!opts.has_key(k)){
-		opts[k] = v;
+host = '';
+port = '';
+opt = '';
+args = [];
+foreach(sys.argv[1 ..] as arg){
+	if(opt == '' && arg.startswith('-')){
+		opt = arg;
+	}else{
+		switch(opt){
+			case '-h':
+				host = arg;
+				opt = '';
+				break;
+			case '-p':
+				port = arg;
+				opt = '';
+				break;
+			default:
+				args.append(arg);
+				break;
+		}
 	}
 }
 
-if(opt_err){
+if(host == ''){
+	host = '127.0.0.1';
+	foreach(args as arg){
+		if(!re.match('^[0-9]+$', args[0])){
+			host = arg;
+			break;
+		}
+	}
+}
+if(port == ''){
+	port = '8888';
+	foreach(args as arg){
+		if(re.match('^[0-9]+$', args[0])){
+			port = arg;
+			break;
+		}
+	}
+}
+
+try{
+	port = int(port);
+}catch(Exception e){
+	print 'Invalid argument port: ', port;
 	usage();
 	sys.exit(0);
 }
-
-
-host = opts['-h'];
-port = int(opts['-p']);
 
 sys.path.append('./api/python');
 sys.path.append('../api/python');
@@ -312,8 +347,16 @@ import SSDB.SSDB;
 try{
 	link = new SSDB(host, port);
 }catch(socket.error e){
+	printf('Failed to connect to: %s:%d\n', host, port);
 	print 'Connection error: ', str(e);
 	sys.exit(0);
+}
+welcome();
+
+try{
+	resp = link.request('info', []);
+	print 'ssdb-server version: ' + resp.data[2] + '\n';
+}catch(Exception e){
 }
 
 while(true){
@@ -350,37 +393,48 @@ while(true){
 	if(len(ps) == 0){
 		continue;
 	}
-	cmd = ps[0];
+	cmd = ps[0].lower();
 	args = ps[1 .. ];
 	
-	if(cmd == 'flushdb'){
-		stime = datetime.datetime.now();
-		if(len(args) == 0){
-			flushdb(link, '');
-		}else{
-			flushdb(link, args[0]);
+	if(cmd == ':'){
+		op = '';
+		if(len(args) > 0){
+			op = args[0];
 		}
-		sys.stderr.write(sprintf('(%.3f sec)\n', timespan(stime)));
+		if(op != 'escape'){
+			print "Bad setting!";
+			continue;
+		}
+		yn = 'yes';
+		if(len(args) > 1){
+			yn = args[1];
+		}
+		gs = globals();
+		if(yn == 'yes'){
+			gs['escape_data'] = true;
+			print "  Escape response";
+		}else if(yn == 'no' || yn == 'none'){
+			gs['escape_data'] = false;
+			print "  No escape response";
+		}else{
+			print "  Usage: escape yes|no";
+		}
 		continue;
 	}
-	if(cmd == 'hclear'){
-		if(len(args) == 0){
-			printf('Missing arguement 1!\n');
-		}else{
+	
+	try{
+		if(cmd == 'flushdb'){
 			stime = datetime.datetime.now();
-			num = hclear(link, args[0]);
-			sys.stderr.write(sprintf('%d\n(%.3f sec)\n', num, timespan(stime)));
+			if(len(args) == 0){
+				flushdb(link, '');
+			}else{
+				flushdb(link, args[0]);
+			}
+			sys.stderr.write(sprintf('(%.3f sec)\n', timespan(stime)));
+			continue;
 		}
-		continue;
-	}
-	if(cmd == 'zclear'){
-		if(len(args) == 0){
-			printf('Missing arguement 1!\n');
-		}else{
-			stime = datetime.datetime.now();
-			num = zclear(link, args[0]);
-			sys.stderr.write(sprintf('%d\n(%.3f sec)\n', num, timespan(stime)));
-		}
+	}catch(Exception e){
+		sys.stderr.write("error! - " + str(e) + "\n");
 		continue;
 	}
 
@@ -414,7 +468,11 @@ while(true){
 
 	time_consume = timespan(stime);
 	if(!resp.ok()){
-		print 'error: ' + resp.code;
+		if(resp.not_found()){
+			print 'not_found';
+		}else{
+			print 'error: ' + resp.code;
+		}
 		sys.stderr.write(sprintf('(%.3f sec)\n', time_consume));
 	}else{
 		switch(cmd){
@@ -443,9 +501,24 @@ while(true){
 				}
 				sys.stderr.write(sprintf('%d result(s) (%.3f sec)\n', len(resp.data), time_consume));
 				break;
+			case 'getbit':
+			case 'setbit':
+			case 'countbit':
+			case 'strlen':
+			case 'getset':
+			case 'setnx':
 			case 'get':
+			case 'substr':
+			case 'ttl':
+			case 'expire':
 			case 'zget':
 			case 'hget':
+			case 'qfront':
+			case 'qback':
+			case 'qget':
+			case 'qpop':
+			case 'qpop_front':
+			case 'qpop_back':
 			case 'incr':
 			case 'decr':
 			case 'zincr':
@@ -454,15 +527,29 @@ while(true){
 			case 'hdecr':
 			case 'hsize':
 			case 'zsize':
+			case 'qsize':
 			case 'zrank':
 			case 'zrrank':
+			case 'zsum':
+			case 'zcount':
+			case 'zavg':
+			case 'zremrangebyrank':
+			case 'zremrangebyscore':
+			case 'zavg':
 			case 'multi_del':
 			case 'multi_hdel':
 			case 'multi_zdel':
+			case 'hclear':
+			case 'zclear':
+			case 'qclear':
+			case 'qpush':
+			case 'qpush_front':
+			case 'qpush_back':
 				print repr_data(resp.data);
 				sys.stderr.write(sprintf('(%.3f sec)\n', time_consume));
 				break;
 			case 'set':
+			case 'setx':
 			case 'zset':
 			case 'hset':
 			case 'del':
@@ -473,6 +560,7 @@ while(true){
 				break;
 			case 'scan':
 			case 'rscan':
+			case 'hgetall':
 			case 'hscan':
 			case 'hrscan':
 				printf('%-15s %s\n', 'key', 'value');
@@ -505,12 +593,24 @@ while(true){
 				}
 				sys.stderr.write(sprintf('%d result(s) (%.3f sec)\n', len(resp.data), time_consume));
 				break;
-			case 'hlist':
-			case 'zlist':
-				printf('  %15s\n', 'name');
+			case 'hvals':
+				printf('  %15s\n', 'value');
 				print ('-' * 17);
 				foreach(resp.data as k){
 					printf('  %15s\n', repr_data(k));
+				}
+				sys.stderr.write(sprintf('%d result(s) (%.3f sec)\n', len(resp.data), time_consume));
+				break;
+			case 'hlist':
+			case 'hrlist':
+			case 'zlist':
+			case 'zrlist':
+			case 'qlist':
+			case 'qrlist':
+			case 'qslice':
+			case 'qrange':
+				foreach(resp.data as k){
+					printf('  %s\n', repr_data(k));
 				}
 				sys.stderr.write(sprintf('%d result(s) (%.3f sec)\n', len(resp.data), time_consume));
 				break;
@@ -529,7 +629,7 @@ while(true){
 				for(i=1; i<len(resp.data); i++){
 					s = resp.data[i];
 					if(is_val){
-						s = '	' + s.replace('\n', '\n	');
+						s = '    ' + s.replace('\n', '\n    ');
 					}
 					print s;
 					is_val = !is_val;

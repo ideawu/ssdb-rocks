@@ -5,11 +5,12 @@
 *.pyc
 var/*
 var_slave/*
+dev_ssdb.conf
 *.swp
 *_cpy_*
 ssdb-server
-tools/ssdb-bench
 tools/ssdb-dump
+tools/ssdb-bench
 tools/ssdb-repair
 tools/leveldb-import
 _pack
@@ -21,5 +22,7 @@ api/cpp/hello-ssdb
 api/cpp/test
 api/cpp/html
 api/php/a.php
+api/php/c.php
 api/java/Test.java
+src/util/test_sorted_set
 

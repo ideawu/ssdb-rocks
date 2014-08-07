@@ -1,12 +1,14 @@
 #include "include.h"
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <string>
 #include <vector>
 
-#include "rocksdb/db.h"
-#include "rocksdb/options.h"
-#include "rocksdb/slice.h"
-#include "rocksdb/iterator.h"
+#include "leveldb/db.h"
+#include "leveldb/options.h"
+#include "leveldb/slice.h"
+#include "leveldb/iterator.h"
 
 #include "link.h"
 #include "include.h"
@@ -40,7 +42,7 @@ static std::string serialize_req(T &req){
 
 void welcome(){
 	printf("ssdb-dump - SSDB backup command\n");
-	printf("Copyright (c) 2012 ideawu.com\n");
+	printf("Copyright (c) 2012-2014 ssdb.io\n");
 	printf("\n");
 }
 
@@ -72,31 +74,47 @@ int main(int argc, char **argv){
 		return 0;
 	}
 	if(mkdir(output_folder, 0777) == -1){
-		perror("error create backup directory!");
+		perror("error create backup directory!\n");
 		return 0;
 	}
 
 	std::string data_dir = "";
 	data_dir.append(output_folder);
 	data_dir.append("/data");
+	
+	{
+		std::string meta_dir = "";
+		meta_dir.append(output_folder);
+		meta_dir.append("/meta");
+
+		int ret;
+		ret = mkdir(meta_dir.c_str(), 0755);
+		if(ret == -1){
+			fprintf(stderr, "error creating meta dir\n");
+			exit(0);
+		}
+	}
 
 	// connect to server
 	Link *link = Link::connect(ip, port);
 	if(link == NULL){
-		printf("error connecting to server!\n");
+		fprintf(stderr, "error connecting to server!\n");
 		return 0;
 	}
 
-	link->send("dump", "", "", "2147483647");
+	link->send("dump", "A", "", "-1");
 	link->flush();
 
-	rocksdb::DB* db;
-	rocksdb::Options options;
-	rocksdb::Status status;
+	leveldb::DB* db;
+	leveldb::Options options;
+	leveldb::Status status;
 	options.create_if_missing = true;
-	status = rocksdb::DB::Open(options, data_dir.c_str(), &db);
+	options.write_buffer_size = 32 * 1024 * 1024;
+	options.compression = leveldb::kSnappyCompression;
+
+	status = leveldb::DB::Open(options, data_dir.c_str(), &db);
 	if(!status.ok()){
-		printf("open rocksdb: %s error!\n", output_folder);
+		printf("open leveldb: %s error!\n", output_folder);
 		return 0;
 	}
 
@@ -104,18 +122,22 @@ int main(int argc, char **argv){
 	while(1){
 		const std::vector<Bytes> *req = link->recv();
 		if(req == NULL){
-			printf("error\n");
-			break;
+			printf("recv error\n");
+			printf("ERROR: failed to dump data!\n");
+			exit(0);
 		}else if(req->empty()){
-			if(link->read() <= 0){
-				printf("read end\n");
-				break;
+			int len = link->read();
+			if(len <= 0){
+				printf("read error: %s\n", strerror(errno));
+				printf("ERROR: failed to dump data!\n");
+				exit(0);
 			}
 		}else{
 			Bytes cmd = req->at(0);
 			if(cmd == "begin"){
 				printf("recv begin...\n");
 			}else if(cmd == "end"){
+				printf("received %d entry(s)\n", dump_count);
 				printf("recv end\n\n");
 				break;
 			}else if(cmd == "set"){
@@ -126,7 +148,8 @@ int main(int argc, char **argv){
 
 				if(req->size() != 3){
 					printf("invalid set params!\n");
-					break;
+					printf("ERROR: failed to dump data!\n");
+					exit(0);
 				}
 				Bytes key = req->at(1);
 				Bytes val = req->at(2);
@@ -134,12 +157,13 @@ int main(int argc, char **argv){
 					continue;
 				}
 				
-				rocksdb::Slice k = key.Slice();
-				rocksdb::Slice v = val.Slice();
-				status = db->Put(rocksdb::WriteOptions(), k, v);
+				leveldb::Slice k = key.Slice();
+				leveldb::Slice v = val.Slice();
+				status = db->Put(leveldb::WriteOptions(), k, v);
 				if(!status.ok()){
-					printf("put rocksdb error!\n");
-					break;
+					printf("put leveldb error!\n");
+					printf("ERROR: failed to dump data!\n");
+					exit(0);
 				}
 
 				dump_count ++;
@@ -148,33 +172,51 @@ int main(int argc, char **argv){
 				}
 			}else{
 				printf("error: unknown command %s\n", std::string(cmd.data(), cmd.size()).c_str());
-				break;
+				printf("ERROR: failed to dump data!\n");
+				exit(0);
 			}
 		}
 	}
 	printf("total dumped %d entry(s)\n", dump_count);
 
+	/*
 	printf("checking data...\n");
-	rocksdb::Iterator *it;
-	it = db->NewIterator(rocksdb::ReadOptions());
+	leveldb::Iterator *it;
+	it = db->NewIterator(leveldb::ReadOptions());
 	int save_count = 0;
 	for(it->SeekToFirst(); it->Valid(); it->Next()){
 		save_count ++;
-		/*
-		std::string k = hexmem(it->key().data(), it->key().size());
-		std::string v = hexmem(it->value().data(), it->value().size());
-		printf("%d %s : %s", save_count, k.c_str(), v.c_str());
-		*/
+		//std::string k = hexmem(it->key().data(), it->key().size());
+		//std::string v = hexmem(it->value().data(), it->value().size());
+		//printf("%d %s : %s", save_count, k.c_str(), v.c_str());
 	}
 	if(dump_count != save_count){
 		printf("checking failed! dumped: %d, saved: %d\n", dump_count, save_count);
 	}else{
 		printf("checking OK.\n");
 		printf("\n");
-		printf("backup has been made to folder: %s\n", output_folder);
+	}
+	*/
+
+	{
+		std::string val;
+		if(db->GetProperty("leveldb.stats", &val)){
+			fprintf(stderr, "%s\n", val.c_str());
+		}
 	}
 
+	fprintf(stderr, "compacting data...\n");
+	db->CompactRange(NULL, NULL);
+	
+	{
+		std::string val;
+		if(db->GetProperty("leveldb.stats", &val)){
+			fprintf(stderr, "%s\n", val.c_str());
+		}
+	}
 
+	printf("backup has been made to folder: %s\n", output_folder);
+	
 	delete link;
 	delete db;
 	return 0;

@@ -55,6 +55,17 @@ class SSDBTest extends UnitTest{
 				$this->assert($ret == 0);
 			}
 		}
+		while(1){
+			$names = $ssdb->qlist('TEST_', 'TEST_'.pack('C', 255), 1000);
+			if(!$names){
+				break;
+			}
+			foreach($names as $name){
+				$deleted += $ssdb->qclear($name);
+				$ret = $ssdb->qsize($name);
+				$this->assert($ret == 0);
+			}
+		}
 		if($deleted > 0){
 			echo "clear $deleted\n";
 		}
@@ -63,6 +74,13 @@ class SSDBTest extends UnitTest{
 	function test_kv(){
 		$ssdb = $this->ssdb;
 		$val = str_repeat(mt_rand(), mt_rand(1, 100));
+		
+		$ssdb->setx('TEST_a', $val, 1);
+		$ret = $this->ssdb->get('TEST_a');
+		$this->assert($ret === $val);
+		usleep(1.5 * 1000 * 1000);
+		$ret = $this->ssdb->get('TEST_a');
+		$this->assert($ret === null);
 
 		$ssdb->set('TEST_a', $val);
 		$ssdb->set('TEST_b', $val);
@@ -114,6 +132,89 @@ class SSDBTest extends UnitTest{
 		$ret = $ssdb->get('TEST_a');
 		$this->assert($ret === null);
 		$ssdb->del('TEST_b');
+		
+		$ssdb->del('TEST_a');
+		$ret = $ssdb->setnx('TEST_a', 'a');
+		$this->assert($ret === 1);
+		$ret = $ssdb->setnx('TEST_a', 't');
+		$this->assert($ret === 0);
+		$ret = $ssdb->get('TEST_a');
+		$this->assert($ret === 'a');
+		
+		$ssdb->del('TEST_a');
+		$ret = $ssdb->getset('TEST_a', 'a');
+		$this->assert($ret === null);
+		$ret = $ssdb->getset('TEST_a', 'b');
+		$this->assert($ret === 'a');
+		$ret = $ssdb->get('TEST_a');
+		$this->assert($ret === 'b');
+
+		$key = 'TEST_a';
+		$ssdb->del($key);
+		$ret = $ssdb->setbit($key, 8, 1);
+		$this->assert($ret === 0);
+		$ret = $ssdb->setbit($key, 8, 1);
+		$this->assert($ret === 1);
+		$ret = $ssdb->countbit($key, 0, 1);
+		$this->assert($ret === 0);
+		$ret = $ssdb->countbit($key, 0, 2);
+		$this->assert($ret === 1);
+		$ret = $ssdb->strlen($key);
+		$this->assert($ret === 2);
+		$val = '0123456789';
+		$ssdb->set($key, $val);
+		$this->assert($ssdb->substr($key, 0, 1) === substr($val, 0, 1));
+		$this->assert($ssdb->substr($key, -1, -1) === substr($val, -1, -1));
+		$this->assert($ssdb->substr($key, 0, -1) === substr($val, 0, -1));
+		$this->assert($ssdb->substr($key, -1, -2) === substr($val, -1, -2));
+		$this->assert($ssdb->substr($key, -2, -1) === substr($val, -2, -1));
+		$this->assert($ssdb->substr($key, -2, 2) === substr($val, -2, 2));
+	}
+	
+	function test_queue(){
+		$ssdb = $this->ssdb;
+		$name = "TEST_" . str_repeat(mt_rand(), mt_rand(1, 6));
+		$key = "TEST_" . str_repeat(mt_rand(), mt_rand(1, 6));
+		$val = str_repeat(mt_rand(), mt_rand(1, 30));
+				
+		for($i=0; $i<7; $i++){
+			$size = $ssdb->qpush($name, $i);
+			$this->assert($size === $i + 1);
+		}
+		$size = $ssdb->qpush($name, array(7,8,9));
+		$this->assert($size == 10);
+		
+		$ret = $ssdb->qget($name, 3);
+		$this->assert($ret == 3);
+		$ret = $ssdb->qslice($name, 0, -1);
+		for($i=0; $i<10; $i++){
+			$this->assert($ret[$i] == $i);
+		}
+		$ret = $ssdb->qsize($name);
+		$this->assert($ret === 10);
+		$ret = $ssdb->qfront($name);
+		$this->assert($ret == 0);
+		$ret = $ssdb->qback($name);
+		$this->assert($ret == 9);
+		for($i=0; $i<10; $i++){
+			$ret = $ssdb->qpop($name);
+			if($ret != $i){
+				$this->assert(false);
+				break;
+			}
+		}
+
+		$ret = $ssdb->qfront($name);
+		$this->assert($ret === null);
+		$ret = $ssdb->qback($name);
+		$this->assert($ret === null);
+		
+		$ssdb->qpush_back($name, 0);
+		$ssdb->qpush_front($name, 9);
+		$ret = $ssdb->qfront($name);
+		$this->assert($ret == 9);
+		$ret = $ssdb->qback($name);
+		$this->assert($ret == 0);
 	}
 
 	function test_hash(){
@@ -124,6 +225,11 @@ class SSDBTest extends UnitTest{
 
 		$ret = $ssdb->hsize($name);
 		$this->assert($ret === 0);
+
+		$ret = $ssdb->multi_hset($name, array('a' => 1, 'a' => 2));
+		$this->assert($ret == 1);
+		$ret = $ssdb->multi_hdel($name, array('a', 'a'));
+		$this->assert($ret == 1);
 
 		$ret = $ssdb->hset($name, $key, $val);
 		$ret = $ssdb->hexists($name, $key);
@@ -210,6 +316,11 @@ class SSDBTest extends UnitTest{
 		$ret = $ssdb->zsize($name);
 		$this->assert($ret === 0);
 
+		$ret = $ssdb->multi_zset($name, array('a' => 1, 'a' => 2));
+		$this->assert($ret == 1);
+		$ret = $ssdb->multi_zdel($name, array('a', 'a'));
+		$this->assert($ret == 1);
+
 		$ret = $ssdb->zset($name, $key, $val);
 		$ret = $ssdb->zexists($name, $key);
 		$this->assert($ret);
@@ -286,6 +397,37 @@ class SSDBTest extends UnitTest{
 		$this->assert($ret === false);
 		$ret = $ssdb->zget('TEST_a', 'a');
 		$this->assert($ret === null);
+		
+		$ssdb->zclear($name);
+		$ssdb->request('multi_zset', $name, 'a', '1', 'b', '2', 'c', '3', 'd', '4', 'e', '5');
+		$ret = $ssdb->zcount($name, 2, 4);
+		$this->assert($ret === 3);
+		$ret = $ssdb->zsum($name, 2, 4);
+		$this->assert($ret === 9);
+		$ret = $ssdb->zavg($name, 2, 3);
+		$this->assert($ret === 2.5);
+		$ret = $ssdb->zRemRangeByScore($name, 4, 5);
+		$this->assert($ret === 2);
+		$ret = $ssdb->zRemRangeByRank($name, 1, 2);
+		$this->assert($ret === 2);
+
+		$ssdb->zclear($name);
+		for($i=0; $i<10; $i++){
+			$ssdb->zset($name, $i, $i);
+		}
+		$ret = $ssdb->zscan($name, '', 3, 10, 1);
+		$vals = array_values($ret);
+		$this->assert($vals[0] === 3);
+		$ret = $ssdb->zscan($name, '3', 3, 10, 1);
+		$vals = array_values($ret);
+		$this->assert($vals[0] === 4);
+
+		$ret = $ssdb->zrscan($name, '', 3, 1, 1);
+		$vals = array_values($ret);
+		$this->assert($vals[0] === 3);
+		$ret = $ssdb->zrscan($name, '3', 3, 1, 1);
+		$vals = array_values($ret);
+		$this->assert($vals[0] === 2);
 	}
 }
 
