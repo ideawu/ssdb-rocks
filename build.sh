@@ -4,6 +4,7 @@ JEMALLOC_PATH="$BASE_DIR/deps/jemalloc-3.3.1"
 LEVELDB_PATH="$BASE_DIR/deps/rocksdb-master"
 
 ln -sf $LEVELDB_PATH/include/rocksdb $LEVELDB_PATH/include/leveldb
+mkdir -p var var_slave
 
 if test -z "$TARGET_OS"; then
 	TARGET_OS=`uname -s`
