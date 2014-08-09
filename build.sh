@@ -2,6 +2,7 @@
 BASE_DIR=`pwd`
 JEMALLOC_PATH="$BASE_DIR/deps/jemalloc-3.3.1"
 LEVELDB_PATH="$BASE_DIR/deps/rocksdb-master"
+SNAPPY_PATH="$BASE_DIR/deps/snappy-1.1.0"
 
 ln -sf $LEVELDB_PATH/include/rocksdb $LEVELDB_PATH/include/leveldb
 mkdir -p var var_slave
@@ -59,6 +60,21 @@ case "$TARGET_OS" in
 esac
 
 
+DIR=`pwd`
+cd $SNAPPY_PATH
+if [ ! -f Makefile ]; then
+	echo ""
+	echo "##### building snappy... #####"
+	./configure $SNAPPY_HOST
+	# FUCK! snappy compilation doesn't work on some linux!
+	find . | xargs touch
+	make
+	echo "##### building snappy finished #####"
+	echo ""
+fi
+cd "$DIR"
+
+
 case "$TARGET_OS" in
 	CYGWIN*|FreeBSD|OS_ANDROID_CROSSCOMPILE)
 		echo "not using jemalloc on $TARGET_OS"
@@ -113,6 +129,7 @@ echo "CFLAGS += -I \"$LEVELDB_PATH/include\"" >> build_config.mk
 echo "CLIBS=" >> build_config.mk
 echo "CLIBS += ${PLATFORM_CLIBS}" >> build_config.mk
 echo "CLIBS += -lbz2 -lz \"$LEVELDB_PATH/librocksdb.a\"" >> build_config.mk
+echo "CLIBS += \"$SNAPPY_PATH/.libs/libsnappy.a\"" >> build_config.mk
 
 
 case "$TARGET_OS" in
