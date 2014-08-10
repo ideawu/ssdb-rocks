@@ -26,7 +26,7 @@ case "$TARGET_OS" in
 		#PLATFORM_CFLAGS=""
         ;;
     Linux)
-        PLATFORM_CLIBS="-pthread"
+        PLATFORM_CLIBS="-pthread -lrt"
         ;;
     OS_ANDROID_CROSSCOMPILE)
         PLATFORM_CLIBS="-pthread"
